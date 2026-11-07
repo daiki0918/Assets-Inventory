@@ -1,0 +1,12 @@
+# Environment credentials and local-only overrides
+.env
+.env.*
+!.env.example
+server/.env
+server/.env.*
+!server/.env.example
+
+# Generated artifacts and dependencies
+client/dist/
+client/node_modules/
+server/node_modules/
