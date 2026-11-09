@@ -5,7 +5,18 @@ import { after, before, test } from 'node:test';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
-import { Asset, Branch, Cluster, Location, User } from '../models.js';
+import {
+  AlertState,
+  Asset,
+  Branch,
+  Cluster,
+  InventoryScan,
+  InventorySession,
+  Location,
+  PasswordResetCode,
+  TransferRequest,
+  User,
+} from '../models.js';
 import { app } from '../server.js';
 
 const originalUri = process.env.MONGODB_URI;
@@ -404,10 +415,76 @@ test('authenticated asset-management workflows preserve scope and consistency', 
     });
     assert.equal(removeLocations.status, 200);
     assert.equal(await Location.countDocuments({ branch: branchC._id }), 0);
-    assert.equal((await request(`/admin/branches/${branchC._id}`, { token: adminToken, method: 'DELETE' })).status, 200);
 
-    const protectedDelete = await request(`/admin/branches/${branchA._id}`, { token: adminToken, method: 'DELETE' });
-    assert.equal(protectedDelete.status, 409);
+    const cascadeLocation = await Location.create({ name: 'Cascade Room', branch: branchC._id });
+    const cascadeAssetResponse = await request('/assets', {
+      token: adminToken,
+      method: 'POST',
+      body: { name: 'Cascade Test Asset', branch: String(branchC._id), location: String(cascadeLocation._id) },
+    });
+    assert.equal(cascadeAssetResponse.status, 201);
+    const cascadeAssetId = cascadeAssetResponse.data._id;
+    const cascadeUser = await User.create({
+      email: `cascade-${suffix.toLowerCase()}@test.invalid`,
+      name: 'Cascade Operator',
+      role: 'operator',
+      branch: branchC._id,
+      passwordHash: await bcrypt.hash('Cascade-Test-Password-83!', 10),
+    });
+    const cascadeSession = await InventorySession.create({
+      branch: branchC._id,
+      month: '2026-12',
+      createdBy: cascadeUser._id,
+    });
+    const cascadeScan = await InventoryScan.create({
+      session: cascadeSession._id,
+      asset: cascadeAssetId,
+      code: cascadeAssetResponse.data.inventoryTag,
+      scanBranch: branchC._id,
+      scannedBy: cascadeUser._id,
+      outcome: 'verified',
+      verified: true,
+    });
+    const cascadeTransfer = await TransferRequest.create({
+      asset: cascadeAssetId,
+      requestedBy: cascadeUser._id,
+      sourceBranch: branchC._id,
+      sourceLocation: cascadeLocation._id,
+      destinationBranch: branchB._id,
+      destinationLocation: locationB._id,
+      note: 'Cascade deletion test',
+    });
+    const resetCode = await PasswordResetCode.create({
+      user: cascadeUser._id,
+      codeHash: 'test-hash',
+      expiresAt: new Date(Date.now() + 60_000),
+      requestedAt: new Date(),
+    });
+    const alertState = await AlertState.create({ user: cascadeUser._id, key: 'test-alert' });
+
+    const cascadeDelete = await request(`/admin/branches/${branchC._id}`, { token: adminToken, method: 'DELETE' });
+    assert.equal(cascadeDelete.status, 200);
+    assert.deepEqual(
+      {
+        deleted: cascadeDelete.data.deleted,
+        assets: cascadeDelete.data.assets,
+        locations: cascadeDelete.data.locations,
+        users: cascadeDelete.data.users,
+        inventorySessions: cascadeDelete.data.inventorySessions,
+      },
+      { deleted: true, assets: 1, locations: 1, users: 1, inventorySessions: 1 },
+    );
+    assert.equal(await Branch.exists({ _id: branchC._id }), null);
+    assert.equal(await Asset.exists({ _id: cascadeAssetId }), null);
+    assert.equal(await Location.exists({ _id: cascadeLocation._id }), null);
+    assert.equal(await User.exists({ _id: cascadeUser._id }), null);
+    assert.equal(await InventorySession.exists({ _id: cascadeSession._id }), null);
+    assert.equal(await InventoryScan.exists({ _id: cascadeScan._id }), null);
+    assert.equal(await TransferRequest.exists({ _id: cascadeTransfer._id }), null);
+    assert.equal(await PasswordResetCode.exists({ _id: resetCode._id }), null);
+    assert.equal(await AlertState.exists({ _id: alertState._id }), null);
+    assert.ok(await Branch.exists({ _id: branchA._id }));
+    assert.ok(await Asset.exists({ _id: assetsA[0]._id }));
 
     const adminAudit = await request('/audit', { token: adminToken });
     assert.equal(adminAudit.status, 200);

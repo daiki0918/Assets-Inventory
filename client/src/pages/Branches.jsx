@@ -378,7 +378,10 @@ export default function Branches() {
             <div className="modal-heading">
               <p className="eyebrow">Destructive action</p>
               <h2 id="delete-branch-title">Delete branch?</h2>
-              <p className="sub">This permanently removes <b>{deleteTarget.name}</b> if it has no assets, locations, or users.</p>
+              <p className="sub">
+                This permanently deletes <b>{deleteTarget.name}</b> and its locations, assets and asset history,
+                branch users, inventory sessions and scans, and related transfer requests. This cannot be undone.
+              </p>
             </div>
             <div className="modal-actions">
               <button className="btn" onClick={() => setDeleteTarget(null)} disabled={busy}>Cancel</button>

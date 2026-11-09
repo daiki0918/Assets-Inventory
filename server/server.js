@@ -426,26 +426,63 @@ app.put('/api/admin/branches/:id', auth, superOnly, wrap(async (req, res) => {
 
 app.delete('/api/admin/branches/:id', auth, superOnly, wrap(async (req, res) => {
   const session = await mongoose.startSession();
+  let deletedCounts;
   try {
     await session.withTransaction(async () => {
       const branch = await Branch.findById(req.params.id).session(session);
       if (!branch) throw fail(404, 'Branch not found');
-      const [assetCount, locationCount, userCount, inventorySessionCount, transferRequestCount] = await Promise.all([
-        Asset.countDocuments({ branch: branch._id }).session(session),
-        Location.countDocuments({ branch: branch._id }).session(session),
-        User.countDocuments({ branch: branch._id }).session(session),
-        InventorySession.countDocuments({ branch: branch._id }).session(session),
-        TransferRequest.countDocuments({ $or: [{ sourceBranch: branch._id }, { destinationBranch: branch._id }] }).session(session),
-      ]);
-      if (assetCount || locationCount || userCount || inventorySessionCount || transferRequestCount) {
-        throw fail(409, 'Branch cannot be deleted while it has assets, locations, users, inventory sessions, or transfer requests');
-      }
+      const locations = await Location.find({ branch: branch._id }).select('_id').session(session).lean();
+      const locationIds = locations.map((location) => location._id);
+      const users = await User.find({ branch: branch._id }).select('_id').session(session).lean();
+      const userIds = users.map((user) => user._id);
+      const inventorySessions = await InventorySession.find({
+        $or: [{ branch: branch._id }, { createdBy: { $in: userIds } }],
+      }).select('_id').session(session).lean();
+      const inventorySessionIds = inventorySessions.map((inventorySession) => inventorySession._id);
+      const assets = await Asset.find({
+        $or: [{ branch: branch._id }, { location: { $in: locationIds } }],
+      }).select('_id').session(session).lean();
+      const assetIds = assets.map((asset) => asset._id);
+
+      const deletedTransferRequests = await TransferRequest.deleteMany({
+        $or: [
+          { sourceBranch: branch._id },
+          { destinationBranch: branch._id },
+          { sourceLocation: { $in: locationIds } },
+          { destinationLocation: { $in: locationIds } },
+          { asset: { $in: assetIds } },
+          { requestedBy: { $in: userIds } },
+          { reviewedBy: { $in: userIds } },
+        ],
+      }).session(session);
+      const deletedScans = await InventoryScan.deleteMany({
+        $or: [
+          { session: { $in: inventorySessionIds } },
+          { asset: { $in: assetIds } },
+          { scanBranch: branch._id },
+          { scannedBy: { $in: userIds } },
+        ],
+      }).session(session);
+      await PasswordResetCode.deleteMany({ user: { $in: userIds } }).session(session);
+      await AlertState.deleteMany({ user: { $in: userIds } }).session(session);
+      await InventorySession.deleteMany({ _id: { $in: inventorySessionIds } }).session(session);
+      await Asset.deleteMany({ _id: { $in: assetIds } }).session(session);
+      await Location.deleteMany({ _id: { $in: locationIds } }).session(session);
+      await User.deleteMany({ _id: { $in: userIds } }).session(session);
       await branch.deleteOne({ session });
+      deletedCounts = {
+        assets: assetIds.length,
+        locations: locationIds.length,
+        users: userIds.length,
+        inventorySessions: inventorySessionIds.length,
+        inventoryScans: deletedScans.deletedCount,
+        transferRequests: deletedTransferRequests.deletedCount,
+      };
     });
   } finally {
     await session.endSession();
   }
-  res.json({ deleted: true });
+  res.json({ deleted: true, ...deletedCounts });
 }));
 
 app.post('/api/admin/users', auth, superOnly, wrap(async (req, res) => {
