@@ -3,9 +3,8 @@ import { Cluster, Branch, Location, User } from './models.js';
 await mongoose.connect(process.env.MONGODB_URI);
 try {
   const tree = {
-    SOUTH: { CARCAR: 'CCR', ARGAO: 'ARG' },
-    'METRO CEBU': { JUNQUERA: 'JNQ', MARACAS: 'MRC', CORDOVA: 'CRD', LAPULAPU: 'LLP', MANDAUE: 'MND' },
-    NORTH: { LILOAN: 'LIL', DANAO: 'DNO', BOGO: 'BGO' },
+    SOUTH: { CARCAR: 'CCR', ARGAO: 'ARG', JUNQUERA: 'JNQ', CORDOVA: 'CRD', LAPULAPU: 'LLP'},
+    NORTH: { LILOAN: 'LIL', DANAO: 'DNO', BOGO: 'BGO', MARACAS: 'MRC', MANDAUE: 'MND'},
   };
   const zones = ['OFFICE', 'SHOWROOM', 'EMBALMING ROOM', 'CHAPEL A', 'CHAPEL B', 'LOBBY'];
   for (const [clusterName, branches] of Object.entries(tree)) {
