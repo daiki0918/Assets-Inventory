@@ -4,10 +4,15 @@ import { api } from '../lib/api';
 import DrawerPortal from './DrawerPortal';
 
 const emptyForm = { cluster: '', branch: '', location: '', name: '', category: '', description: '', condition: 'Good', serialNo: '', purchaseDate: '', cost: '', salvageValue: 0, usefulLifeYears: 5, quantity: 1 };
+const ASSET_CLUSTERS = new Set(['SOUTH', 'NORTH']);
 const ANIMATION_MS = 300; // keep in sync with the CSS transition duration
 
 export default function AssetModal({ asset, onClose, onSaved }) {
   const { meta, reloadMeta } = useAuth();
+  const assetClusterId = asset?.cluster?._id || asset?.cluster;
+  const clusters = useMemo(() => meta.clusters.filter((item) => (
+    ASSET_CLUSTERS.has(item.name.trim().toUpperCase()) || (asset && item._id === assetClusterId)
+  )), [asset, assetClusterId, meta.clusters]);
   const [form, setForm] = useState(() => asset ? {
     cluster: asset.cluster?._id || '', branch: asset.branch?._id || '', location: asset.location?._id || '',
     name: asset.name || '', category: asset.category || '', description: asset.description || '', condition: asset.condition || 'Good', serialNo: asset.serialNo || '',
@@ -19,7 +24,7 @@ export default function AssetModal({ asset, onClose, onSaved }) {
   const [open, setOpen] = useState(false); // drives the slide-in / slide-out
   const closeTimer = useRef(null);
   const isEditing = Boolean(asset);
-  const cluster = meta.clusters.find((item) => item._id === form.cluster);
+  const cluster = clusters.find((item) => item._id === form.cluster);
   const branches = useMemo(() => cluster ? meta.branches.filter((item) => String(item.cluster?._id || item.cluster) === cluster._id) : [], [cluster, meta.branches]);
   const locations = useMemo(() => meta.locations.filter((item) => String(item.branch?._id || item.branch) === form.branch), [form.branch, meta.locations]);
   const set = (key) => (event) => {
@@ -61,8 +66,8 @@ export default function AssetModal({ asset, onClose, onSaved }) {
   }, [requestClose]);
 
   useEffect(() => {
-    if (!isEditing && !form.cluster && meta.clusters.length === 1) setForm((current) => ({ ...current, cluster: meta.clusters[0]._id }));
-  }, [isEditing, form.cluster, meta.clusters]);
+    if (!isEditing && !form.cluster && clusters.length === 1) setForm((current) => ({ ...current, cluster: clusters[0]._id }));
+  }, [isEditing, form.cluster, clusters]);
 
   const validate = () => {
     setError('');
@@ -140,7 +145,7 @@ export default function AssetModal({ asset, onClose, onSaved }) {
           <form className="asset-drawer-form" onSubmit={submit}>
             <div className="asset-drawer-body">
             <div className="form-section"><h3>Location</h3><div className="form-grid">
-              <div><label htmlFor="asset-cluster">Cluster</label><select id="asset-cluster" required value={form.cluster} onChange={(event) => { setReviewing(false); setForm({ ...form, cluster: event.target.value, branch: '', location: '' }); }}><option value="">Select cluster</option>{meta.clusters.map((item) => <option key={item._id} value={item._id}>{item.name}</option>)}</select></div>
+              <div><label htmlFor="asset-cluster">Cluster</label><select id="asset-cluster" required value={form.cluster} onChange={(event) => { setReviewing(false); setForm({ ...form, cluster: event.target.value, branch: '', location: '' }); }}><option value="">Select cluster</option>{clusters.map((item) => <option key={item._id} value={item._id}>{item.name}</option>)}</select></div>
               <div><label htmlFor="asset-branch">Branch</label><select id="asset-branch" required value={form.branch} disabled={!form.cluster} onChange={(event) => { setReviewing(false); setForm({ ...form, branch: event.target.value, location: '' }); }}><option value="">Select branch</option>{branches.map((item) => <option key={item._id} value={item._id}>{item.name} ({item.prefix})</option>)}</select></div>
               <div><label htmlFor="asset-location">Location / room</label><select id="asset-location" required value={form.location} disabled={!form.branch} onChange={set('location')}><option value="">Select location</option>{locations.map((item) => <option key={item._id} value={item._id}>{item.name}</option>)}</select></div>
             </div></div>
