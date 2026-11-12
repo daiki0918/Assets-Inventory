@@ -48,6 +48,37 @@ const passwordResetCodeHash = (userId, code) => crypto
   .update(`${userId}:${code}`)
   .digest('hex');
 const passwordResetMessage = 'If an account exists for that email, a verification code will be sent. It expires in 10 minutes; contact your administrator if it does not arrive.';
+const CLUSTER_NAMES = ['SOUTH', 'NORTH'];
+const findAvailableAssetTags = async (branch, quantity, session, excludedAssetId) => {
+  const escapedPrefix = branch.prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const inventoryTag = new RegExp(`^${escapedPrefix}-\\d+$`);
+  const existingAssets = await Asset.find({
+    branch: branch._id,
+    inventoryTag,
+    ...(excludedAssetId ? { _id: { $ne: excludedAssetId } } : {}),
+  }).select('inventoryTag').session(session).lean();
+  const usedSequences = new Set(existingAssets.map((asset) => Number(asset.inventoryTag.slice(branch.prefix.length + 1))));
+  const sequences = [];
+  for (let sequence = 1; sequences.length < quantity; sequence += 1) {
+    if (!usedSequences.has(sequence)) sequences.push(sequence);
+  }
+  return sequences.map((sequence) => `${branch.prefix}-${String(sequence).padStart(4, '0')}`);
+};
+const allocateAssetTags = async (branchId, quantity, session, excludedAssetId) => {
+  const branch = await Branch.findByIdAndUpdate(
+    branchId,
+    { $inc: { seq: quantity } },
+    { new: true, session },
+  );
+  if (!branch) throw fail(404, 'Branch not found while reserving asset codes');
+  const inventoryTags = await findAvailableAssetTags(branch, quantity, session, excludedAssetId);
+  const lastAllocatedSequence = Number(inventoryTags.at(-1).slice(branch.prefix.length + 1));
+  if (branch.seq < lastAllocatedSequence) {
+    branch.seq = lastAllocatedSequence;
+    await branch.save({ session });
+  }
+  return { branch, inventoryTags };
+};
 const parseBranchLocations = (value) => {
   if (value === undefined) return null;
   if (!Array.isArray(value)) throw fail(400, 'Locations must be a list');
@@ -370,7 +401,7 @@ app.get('/api/meta', auth, wrap(async (req, res) => {
   res.json({
     branches,
     locations: locations.map((location) => ({ ...location, assetCount: countsByLocation.get(String(location._id)) || 0 })),
-    clusters: await Cluster.find().lean(),
+    clusters: await Cluster.find({ name: { $in: CLUSTER_NAMES } }).lean(),
     statuses: STATUSES,
   });
 }));
@@ -389,7 +420,7 @@ app.post('/api/admin/branches', auth, superOnly, wrap(async (req, res) => {
   let branch;
   try {
     await session.withTransaction(async () => {
-      if (!await Cluster.exists({ _id: req.body.cluster }).session(session)) throw fail(400, 'Cluster not found');
+      if (!await Cluster.exists({ _id: req.body.cluster, name: { $in: CLUSTER_NAMES } }).session(session)) throw fail(400, 'Select either the SOUTH or NORTH cluster');
       if (await Branch.exists({ $or: [{ name }, { prefix }] }).session(session)) throw fail(409, 'A branch with that name or prefix already exists');
       [branch] = await Branch.create([{ name, prefix, cluster: req.body.cluster }], { session });
       const locationOperations = await prepareBranchLocations(branch._id, locations || [], [], session);
@@ -411,11 +442,12 @@ app.put('/api/admin/branches/:id', auth, superOnly, wrap(async (req, res) => {
   let branch;
   try {
     await session.withTransaction(async () => {
-      if (!await Cluster.exists({ _id: req.body.cluster }).session(session)) throw fail(400, 'Cluster not found');
+      if (!await Cluster.exists({ _id: req.body.cluster, name: { $in: CLUSTER_NAMES } }).session(session)) throw fail(400, 'Select either the SOUTH or NORTH cluster');
       if (await Branch.exists({ _id: { $ne: req.params.id }, $or: [{ name }, { prefix }] }).session(session)) throw fail(409, 'A branch with that name or prefix already exists');
       const locationOperations = await prepareBranchLocations(req.params.id, locations, req.body.relocations || [], session);
       branch = await Branch.findByIdAndUpdate(req.params.id, { name, prefix, cluster: req.body.cluster }, { new: true, runValidators: true, session });
       if (!branch) throw fail(404, 'Branch not found');
+      await Asset.updateMany({ branch: branch._id }, { $set: { cluster: branch.cluster } }, { session });
       await saveBranchLocations(locationOperations, session);
     });
   } finally {
@@ -628,6 +660,17 @@ app.post('/api/inventory/sessions/:id/scan', auth, wrap(async (req, res) => {
 }));
 
 // ---- 1 & 2. Procurement, tagging, QR -------------------------------------
+app.post('/api/assets/preview-tags', auth, superOnly, wrap(async (req, res) => {
+  const quantity = Number(req.body.quantity);
+  if (!mongoose.isValidObjectId(req.body.branch)) throw fail(400, 'Select a valid branch');
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 500) {
+    throw fail(400, 'Quantity must be a whole number between 1 and 500');
+  }
+  const branch = await Branch.findById(req.body.branch).select('prefix');
+  if (!branch) throw fail(404, 'Branch not found');
+  res.json({ tags: await findAvailableAssetTags(branch, quantity) });
+}));
+
 app.post('/api/assets', auth, superOnly, wrap(async (req, res) => {
   const d = req.body;
   if (!d.name?.trim()) throw fail(400, 'Asset name is required');
@@ -651,19 +694,13 @@ app.post('/api/assets', auth, superOnly, wrap(async (req, res) => {
   let created = [];
   try {
     await session.withTransaction(async () => {
-      const allocated = await Branch.findByIdAndUpdate(
-        branch._id,
-        { $inc: { seq: quantity } },
-        { new: true, session },
-      );
-      if (!allocated) throw fail(404, 'Branch not found');
+      const { branch: allocated, inventoryTags } = await allocateAssetTags(branch._id, quantity, session);
       if (!await Location.exists({ _id: location._id, branch: allocated._id }).session(session)) {
         throw fail(400, 'Location does not belong to that branch');
       }
-      const firstSequence = allocated.seq - quantity + 1;
       const qrBaseUrl = process.env.APP_URL?.replace(/\/+$/, '') || 'http://localhost:5173';
       const documents = await Promise.all(Array.from({ length: quantity }, async (_, index) => {
-        const inventoryTag = `${allocated.prefix}-${String(firstSequence + index).padStart(4, '0')}`;
+        const inventoryTag = inventoryTags[index];
         const qrToken = crypto.randomBytes(16).toString('hex');
         const qrUrl = `${qrBaseUrl}/a/${qrToken}`;
         const qrCodeValue = inventoryTag;
@@ -782,25 +819,20 @@ app.post('/api/assets/import', auth, superOnly, wrap(async (req, res) => {
         quantityByBranch.set(key, (quantityByBranch.get(key) || 0) + row.quantity);
       }
       const allocatedBranches = new Map();
-      const nextSequence = new Map();
       for (const [branchId, quantity] of quantityByBranch) {
-        const branch = await Branch.findByIdAndUpdate(branchId, { $inc: { seq: quantity } }, { new: true, session });
-        if (!branch) throw fail(404, 'Branch not found while reserving asset codes');
-        allocatedBranches.set(branchId, branch);
-        nextSequence.set(branchId, branch.seq - quantity + 1);
+        allocatedBranches.set(branchId, await allocateAssetTags(branchId, quantity, session));
       }
       const qrBaseUrl = process.env.APP_URL?.replace(/\/+$/, '') || 'http://localhost:5173';
       const documents = [];
       for (const { data, quantity, branch: originalBranch, location } of prepared) {
         const branchId = String(originalBranch._id);
-        const branch = allocatedBranches.get(branchId);
+        const allocation = allocatedBranches.get(branchId);
+        const branch = allocation.branch;
         if (!await Location.exists({ _id: location._id, branch: branch._id }).session(session)) {
           throw fail(400, `Location no longer belongs to ${branch.name}`);
         }
         for (let index = 0; index < quantity; index += 1) {
-          const sequence = nextSequence.get(branchId);
-          nextSequence.set(branchId, sequence + 1);
-          const inventoryTag = `${branch.prefix}-${String(sequence).padStart(4, '0')}`;
+          const inventoryTag = allocation.inventoryTags.shift();
           const qrToken = crypto.randomBytes(16).toString('hex');
           const qrCodeValue = inventoryTag;
           documents.push({
@@ -931,16 +963,8 @@ app.post('/api/transfer-requests', auth, wrap(async (req, res) => {
         const sourceBranchId = asset.branch;
         const sourceLocationId = asset.location;
         const oldTag = asset.inventoryTag;
-        let inventoryTag = '';
-        for (let attempt = 0; attempt < 10; attempt += 1) {
-          const updatedBranch = await Branch.findByIdAndUpdate(destination._id, { $inc: { seq: 1 } }, { new: true, session });
-          if (!updatedBranch) throw fail(404, 'Destination branch not found');
-          const candidate = `${updatedBranch.prefix}-${String(updatedBranch.seq).padStart(4, '0')}`;
-          if (await Asset.exists({ inventoryTag: candidate, _id: { $nin: assetIds } }).session(session)) continue;
-          inventoryTag = candidate;
-          break;
-        }
-        if (!inventoryTag) throw fail(409, 'Could not allocate a unique asset code for the destination branch');
+        const { inventoryTags } = await allocateAssetTags(destination._id, 1, session, asset._id);
+        const [inventoryTag] = inventoryTags;
 
         asset.branch = destination._id;
         asset.cluster = destination.cluster._id;
@@ -981,56 +1005,49 @@ app.post('/api/transfer-requests/:id/approve', auth, superOnly, wrap(async (req,
   if (!request) throw fail(409, 'This transfer request is no longer pending');
 
   try {
-    const asset = await Asset.findById(request.asset);
-    if (!asset) throw fail(404, 'The requested asset no longer exists');
-    if (String(asset.branch) !== String(request.sourceBranch)) throw fail(409, 'The asset branch changed after this request was submitted');
-    if (asset.status === 'Disposed' || asset.status === 'In-Transit') throw fail(409, 'The asset can no longer be transferred');
-    const destination = await Branch.findById(request.destinationBranch).populate('cluster', 'name');
-    if (!destination) throw fail(404, 'The destination branch no longer exists');
-    const location = await Location.findOne({ _id: request.destinationLocation, branch: destination._id });
-    if (!location) throw fail(409, 'The destination location no longer exists');
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const currentRequest = await TransferRequest.findOne({ _id: request._id, status: 'approving' }).session(session);
+        if (!currentRequest) throw fail(409, 'This transfer request is no longer being approved');
+        const asset = await Asset.findById(currentRequest.asset).session(session);
+        if (!asset) throw fail(404, 'The requested asset no longer exists');
+        if (String(asset.branch) !== String(currentRequest.sourceBranch)) throw fail(409, 'The asset branch changed after this request was submitted');
+        if (asset.status === 'Disposed' || asset.status === 'In-Transit') throw fail(409, 'The asset can no longer be transferred');
+        const destination = await Branch.findById(currentRequest.destinationBranch).populate('cluster', 'name').session(session);
+        if (!destination) throw fail(404, 'The destination branch no longer exists');
+        const location = await Location.findOne({ _id: currentRequest.destinationLocation, branch: destination._id }).session(session);
+        if (!location) throw fail(409, 'The destination location no longer exists');
+        const [oldBranch, oldLocation] = await Promise.all([
+          Branch.findById(asset.branch).select('name').session(session).lean(),
+          Location.findById(asset.location).select('name').session(session).lean(),
+        ]);
+        const oldTag = asset.inventoryTag;
+        const { inventoryTags } = await allocateAssetTags(destination._id, 1, session, asset._id);
+        const [inventoryTag] = inventoryTags;
 
-    const [oldBranch, oldLocation] = await Promise.all([
-      Branch.findById(asset.branch).select('name').lean(),
-      Location.findById(asset.location).select('name').lean(),
-    ]);
-    const oldTag = asset.inventoryTag;
-    let inventoryTag = '';
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      const updatedBranch = await Branch.findByIdAndUpdate(destination._id, { $inc: { seq: 1 } }, { new: true });
-      if (!updatedBranch) throw fail(404, 'The destination branch no longer exists');
-      const candidate = `${updatedBranch.prefix}-${String(updatedBranch.seq).padStart(4, '0')}`;
-      if (await Asset.exists({ inventoryTag: candidate, _id: { $ne: asset._id } })) continue;
-      inventoryTag = candidate;
-      break;
+        asset.branch = destination._id;
+        asset.cluster = destination.cluster._id;
+        asset.location = location._id;
+        asset.status = 'In-Transit';
+        asset.inventoryTag = inventoryTag;
+        asset.history.push({
+          by: req.user.name,
+          action: 'Asset transfer approved',
+          note: `${oldTag} · ${oldBranch?.name || 'Unknown'} / ${oldLocation?.name || 'Unknown'} → ${inventoryTag} · ${destination.name} / ${location.name}${currentRequest.note ? ` · ${currentRequest.note}` : ''}`,
+        });
+        await asset.save({ session });
+        currentRequest.status = 'approved';
+        await currentRequest.save({ session });
+      });
+    } finally {
+      await session.endSession();
     }
-    if (!inventoryTag) throw fail(409, 'Could not allocate a unique asset code for the destination branch');
-
-    asset.branch = destination._id;
-    asset.cluster = destination.cluster._id;
-    asset.location = location._id;
-    asset.status = 'In-Transit';
-    asset.inventoryTag = inventoryTag;
-    asset.history.push({
-      by: req.user.name,
-      action: 'Asset transfer approved',
-      note: `${oldTag} · ${oldBranch?.name || 'Unknown'} / ${oldLocation?.name || 'Unknown'} → ${inventoryTag} · ${destination.name} / ${location.name}${request.note ? ` · ${request.note}` : ''}`,
-    });
-    await asset.save();
-
-    request.status = 'approved';
-    await request.save();
     res.json({
       request: await populateTransferRequest(TransferRequest.findById(request._id)).lean(),
-      asset: out(await pop(Asset.findById(asset._id))),
+      asset: out(await pop(Asset.findById(request.asset))),
     });
   } catch (error) {
-    const movedAsset = await Asset.findById(request.asset).select('branch status').lean();
-    if (movedAsset && String(movedAsset.branch) !== String(request.sourceBranch) && movedAsset.status === 'In-Transit') {
-      request.status = 'approved';
-      await request.save();
-      throw error;
-    }
     await TransferRequest.updateOne(
       { _id: request._id, status: 'approving' },
       { $set: { status: 'pending' }, $unset: { reviewedBy: 1, reviewedAt: 1 } },
@@ -1060,28 +1077,41 @@ app.post('/api/assets/:id/transfer', auth, superOnly, wrap(async (req, res) => {
   }
   const b = await Branch.findById(req.body.branch).populate('cluster', 'name'); if (!b) throw fail(404, 'Branch not found');
   const loc = await Location.findOne({ _id: req.body.location, branch: b._id }); if (!loc) throw fail(400, 'Location does not belong to that branch');
-  const oldBranch = await Branch.findById(a.branch).select('name').lean();
-  const oldLocation = await Location.findById(a.location).select('name').lean();
   if (String(a.branch) === String(b._id)) throw fail(400, 'Asset is already in this branch');
-  const oldTag = a.inventoryTag;
-  let inventoryTag = '';
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    const { seq } = await Branch.findByIdAndUpdate(b._id, { $inc: { seq: 1 } }, { new: true });
-    const candidate = `${b.prefix}-${String(seq).padStart(4, '0')}`;
-    if (await Asset.exists({ inventoryTag: candidate, _id: { $ne: a._id } })) continue;
-    inventoryTag = candidate;
-    break;
-  }
-  if (!inventoryTag) throw fail(409, 'Could not allocate a unique asset code for the destination branch');
-  a.branch = b._id; a.cluster = b.cluster._id; a.location = loc._id;
-  a.status = 'In-Transit';
-  a.inventoryTag = inventoryTag;
-  a.history.push({ by: req.user.name, action: 'Asset transferred', note: `${oldTag} · ${oldBranch?.name || 'Unknown'} / ${oldLocation?.name || 'Unknown'} → ${inventoryTag} · ${b.name} / ${loc.name} · Reason: ${reason}` });
+  const session = await mongoose.startSession();
   try {
-    await a.save();
+    await session.withTransaction(async () => {
+      const asset = await Asset.findById(a._id).session(session);
+      if (!asset) throw fail(404, 'Not found');
+      if (asset.status === 'Disposed') throw fail(409, 'Disposed assets are read-only');
+      if (String(asset.branch) === String(b._id)) throw fail(400, 'Asset is already in this branch');
+      if (await TransferRequest.exists({ asset: asset._id, status: { $in: ['pending', 'approving'] } }).session(session)) {
+        throw fail(409, 'Resolve the pending transfer request before transferring this asset');
+      }
+      const destination = await Branch.findById(b._id).populate('cluster', 'name').session(session);
+      if (!destination) throw fail(404, 'Branch not found');
+      const location = await Location.findOne({ _id: req.body.location, branch: destination._id }).session(session);
+      if (!location) throw fail(400, 'Location does not belong to that branch');
+      const [oldBranch, oldLocation] = await Promise.all([
+        Branch.findById(asset.branch).select('name').session(session).lean(),
+        Location.findById(asset.location).select('name').session(session).lean(),
+      ]);
+      const oldTag = asset.inventoryTag;
+      const { inventoryTags } = await allocateAssetTags(destination._id, 1, session, asset._id);
+      const [inventoryTag] = inventoryTags;
+      asset.branch = destination._id;
+      asset.cluster = destination.cluster._id;
+      asset.location = location._id;
+      asset.status = 'In-Transit';
+      asset.inventoryTag = inventoryTag;
+      asset.history.push({ by: req.user.name, action: 'Asset transferred', note: `${oldTag} · ${oldBranch?.name || 'Unknown'} / ${oldLocation?.name || 'Unknown'} → ${inventoryTag} · ${destination.name} / ${location.name} · Reason: ${reason}` });
+      await asset.save({ session });
+    });
   } catch (error) {
     if (error?.code !== 11000) throw error;
     throw fail(409, 'The destination asset code was taken. Please retry the transfer.');
+  } finally {
+    await session.endSession();
   }
   res.json(out(await pop(Asset.findById(a._id))));
 }));

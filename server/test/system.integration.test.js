@@ -68,7 +68,7 @@ before(async () => {
 
   const suffix = randomUUID().slice(0, 8).toUpperCase();
   const passwordHash = await bcrypt.hash('Integration-Test-Password-83!', 10);
-  const cluster = await Cluster.create({ name: `Integration ${suffix}` });
+  const cluster = await Cluster.create({ name: 'SOUTH' });
   branchA = await Branch.create({ name: `Test Source ${suffix}`, prefix: `SA${suffix}`, cluster: cluster._id });
   branchB = await Branch.create({ name: `Test Destination ${suffix}`, prefix: `SB${suffix}`, cluster: cluster._id });
   locationA = await Location.create({ name: 'Source Room', branch: branchA._id });
@@ -206,9 +206,43 @@ test('authenticated asset-management workflows preserve scope and consistency', 
     assert.ok(scopedExport.data.includes('Integration Chair'));
     assert.ok(!scopedExport.data.includes('Destination Chair'));
 
+    const fourthAsset = await request('/assets', {
+      token: adminToken,
+      method: 'POST',
+      body: {
+        name: 'Fourth Integration Chair',
+        branch: String(branchA._id),
+        location: String(locationA._id),
+      },
+    });
+    assert.equal(fourthAsset.status, 201);
+    assert.equal(fourthAsset.data.inventoryTag, `${branchA.prefix}-0004`);
+
     const removed = await request(`/assets/${assetsA[2]._id}`, { token: adminToken, method: 'DELETE' });
     assert.equal(removed.status, 200);
     assert.equal(await Asset.exists({ _id: assetsA[2]._id }), null);
+
+    const tagPreview = await request('/assets/preview-tags', {
+      token: adminToken,
+      method: 'POST',
+      body: { branch: String(branchA._id), quantity: 2 },
+    });
+    assert.equal(tagPreview.status, 200);
+    assert.deepEqual(tagPreview.data.tags, [assetsA[2].inventoryTag, `${branchA.prefix}-0005`]);
+
+    const reusedCodeAsset = await request('/assets', {
+      token: adminToken,
+      method: 'POST',
+      body: {
+        name: 'Replacement Integration Chair',
+        branch: String(branchA._id),
+        location: String(locationA._id),
+      },
+    });
+    assert.equal(reusedCodeAsset.status, 201);
+    assert.equal(reusedCodeAsset.data.inventoryTag, assetsA[2].inventoryTag);
+    assert.equal((await request(`/assets/${reusedCodeAsset.data._id}`, { token: adminToken, method: 'DELETE' })).status, 200);
+    assert.equal((await request(`/assets/${fourthAsset.data._id}`, { token: adminToken, method: 'DELETE' })).status, 200);
   });
 
   await t.test('spreadsheet import is validated, transactional, and assigns unique codes', async () => {

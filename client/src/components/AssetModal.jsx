@@ -21,6 +21,7 @@ export default function AssetModal({ asset, onClose, onSaved }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [reviewing, setReviewing] = useState(false);
+  const [previewTags, setPreviewTags] = useState([]);
   const [open, setOpen] = useState(false); // drives the slide-in / slide-out
   const closeTimer = useRef(null);
   const isEditing = Boolean(asset);
@@ -107,6 +108,11 @@ export default function AssetModal({ asset, onClose, onSaved }) {
       setBusy(true);
       try {
         await reloadMeta();
+        const preview = await api('/assets/preview-tags', {
+          method: 'POST',
+          body: { branch: form.branch, quantity: Number(form.quantity) },
+        });
+        setPreviewTags(preview.tags);
         setReviewing(true);
       } catch (e) {
         setError(e.message);
@@ -119,8 +125,8 @@ export default function AssetModal({ asset, onClose, onSaved }) {
   };
   const selectedBranch = branches.find((item) => item._id === form.branch);
   const previewAssets = !isEditing && selectedBranch
-    ? Array.from({ length: Math.min(Number(form.quantity) || 0, 500) }, (_, index) => ({
-      tag: `${selectedBranch.prefix}-${String((Number(selectedBranch.seq) || 0) + index + 1).padStart(4, '0')}`,
+    ? previewTags.map((tag) => ({
+      tag,
       name: form.name.trim() || 'Unnamed asset',
     }))
     : [];
