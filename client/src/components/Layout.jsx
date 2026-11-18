@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import ScanOverlay from './ScanOverlay';
+import { api } from '../lib/api';
+import useRealtimeRefresh from '../lib/useRealtimeRefresh';
 
 const ICONS = {
   dashboard: <><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></>,
@@ -42,7 +44,14 @@ export default function Layout({ children, theme, setTheme, onSignOut }) {
   const [scanOpen, setScanOpen] = useState(false);
   const [confirmSignOut, setConfirmSignOut] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
+  const [pendingAssetRequests, setPendingAssetRequests] = useState(0);
   const signOutTimer = useRef(null);
+
+  const refreshAssetRequestCount = () => user.role === 'superadmin'
+    ? api('/asset-requests').then((requests) => setPendingAssetRequests(requests.filter((request) => request.status === 'pending').length))
+    : Promise.resolve();
+  useEffect(() => { refreshAssetRequestCount().catch(() => {}); }, [user.role]);
+  useRealtimeRefresh(refreshAssetRequestCount, user.role === 'superadmin');
 
   useEffect(() => () => clearTimeout(signOutTimer.current), []);
   useEffect(() => {
@@ -66,7 +75,7 @@ export default function Layout({ children, theme, setTheme, onSignOut }) {
 
   const groups = [
     { title: 'Overview', links: [['/dashboard', 'dashboard', 'Dashboard'], ['/alerts', 'alerts', 'Alerts']] },
-    { title: 'Assets', links: [['/assets', 'assets', 'All assets']] },
+    { title: 'Assets', links: [['/assets', 'assets', 'All assets'], ['/asset-requests', 'assets', 'Asset requests']] },
     { title: 'Operations', links: [['/transfers', 'transfers', 'Transfers'], ['/maintenance', 'maintenance', 'Maintenance'], ['/inventory', 'inventory', 'Monthly inventory']] },
     { title: 'Reports', links: [['/reports', 'reports', 'Reports']] },
   ];
@@ -105,6 +114,7 @@ export default function Layout({ children, theme, setTheme, onSignOut }) {
                 >
                   <Icon name={icon} className="nav-icon" />
                   <span>{label}</span>
+                  {to === '/asset-requests' && pendingAssetRequests > 0 && <span className="nav-notification-badge" aria-label={`${pendingAssetRequests} pending asset requests`}>{pendingAssetRequests > 99 ? '99+' : pendingAssetRequests}</span>}
                 </NavLink>
               ))}
             </div>
@@ -166,6 +176,7 @@ export default function Layout({ children, theme, setTheme, onSignOut }) {
               <NavLink key={to} to={to} onClick={() => setMoreOpen(false)}>
                 <Icon name={icon} className="nav-icon" />
                 {label}
+                {to === '/asset-requests' && pendingAssetRequests > 0 && <span className="nav-notification-badge" aria-label={`${pendingAssetRequests} pending asset requests`}>{pendingAssetRequests > 99 ? '99+' : pendingAssetRequests}</span>}
               </NavLink>
             ))}
             <button className="theme-toggle" onClick={() => { toggleTheme(); setMoreOpen(false); }}>

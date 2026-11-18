@@ -3,9 +3,31 @@ import { useAuth } from '../context/AuthContext';
 import { api } from '../lib/api';
 import DrawerPortal from './DrawerPortal';
 
-const emptyForm = { cluster: '', branch: '', location: '', name: '', category: '', description: '', condition: 'Good', serialNo: '', purchaseDate: '', cost: '', salvageValue: 0, usefulLifeYears: 5, quantity: 1 };
+const emptyForm = { cluster: '', branch: '', location: '', name: '', category: '', description: '', condition: 'Good', serialNo: '', purchaseDate: '', cost: '', salvageValue: 0, usefulLifeYears: 5, quantity: 1, photoUrl: '' };
 const ASSET_CLUSTERS = new Set(['SOUTH', 'NORTH']);
 const ANIMATION_MS = 300; // keep in sync with the CSS transition duration
+const MAX_PHOTO_BYTES = 1_200_000;
+
+const compressPhoto = (file) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onerror = () => reject(new Error('Could not read this image. Try another file.'));
+  reader.onload = () => {
+    const image = new Image();
+    image.onerror = () => reject(new Error('This image could not be opened.'));
+    image.onload = () => {
+      const scale = Math.min(1, 1200 / Math.max(image.width, image.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(image.width * scale);
+      canvas.height = Math.round(image.height * scale);
+      canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+      const photoUrl = canvas.toDataURL('image/jpeg', 0.8);
+      if (photoUrl.length > MAX_PHOTO_BYTES) reject(new Error('Image is too large after compression. Choose a smaller photo.'));
+      else resolve(photoUrl);
+    };
+    image.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+});
 
 export default function AssetModal({ asset, onClose, onSaved }) {
   const { meta, reloadMeta } = useAuth();
@@ -16,12 +38,13 @@ export default function AssetModal({ asset, onClose, onSaved }) {
   const [form, setForm] = useState(() => asset ? {
     cluster: asset.cluster?._id || '', branch: asset.branch?._id || '', location: asset.location?._id || '',
     name: asset.name || '', category: asset.category || '', description: asset.description || '', condition: asset.condition || 'Good', serialNo: asset.serialNo || '',
-    purchaseDate: asset.purchaseDate?.slice(0, 10) || '', cost: asset.cost ?? '', salvageValue: asset.salvageValue ?? 0, usefulLifeYears: asset.usefulLifeYears ?? 5,
+    purchaseDate: asset.purchaseDate?.slice(0, 10) || '', cost: asset.cost ?? '', salvageValue: asset.salvageValue ?? 0, usefulLifeYears: asset.usefulLifeYears ?? 5, photoUrl: asset.photoUrl || '',
   } : emptyForm);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const [previewTags, setPreviewTags] = useState([]);
+  const [photoBusy, setPhotoBusy] = useState(false);
   const [open, setOpen] = useState(false); // drives the slide-in / slide-out
   const closeTimer = useRef(null);
   const isEditing = Boolean(asset);
@@ -31,6 +54,24 @@ export default function AssetModal({ asset, onClose, onSaved }) {
   const set = (key) => (event) => {
     setReviewing(false);
     setForm((current) => ({ ...current, [key]: event.target.value }));
+  };
+  const selectPhoto = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setError('');
+    if (file.size > 12 * 1024 * 1024) { setError('Choose an image smaller than 12 MB.'); event.target.value = ''; return; }
+    if (!file.type.startsWith('image/')) { setError('Choose an image file.'); event.target.value = ''; return; }
+    setPhotoBusy(true);
+    try {
+      const photoUrl = await compressPhoto(file);
+      setForm((current) => ({ ...current, photoUrl }));
+      setReviewing(false);
+    } catch (e) {
+      setError(e.message);
+      event.target.value = '';
+    } finally {
+      setPhotoBusy(false);
+    }
   };
 
   // Slide in after the first paint so the transition actually runs
@@ -56,8 +97,8 @@ export default function AssetModal({ asset, onClose, onSaved }) {
   }, []);
 
   const requestClose = useCallback(() => {
-    if (!busy) animateOut(onClose);
-  }, [busy, animateOut, onClose]);
+    if (!busy && !photoBusy) animateOut(onClose);
+  }, [busy, photoBusy, animateOut, onClose]);
 
   // Close on Escape
   useEffect(() => {
@@ -90,7 +131,7 @@ export default function AssetModal({ asset, onClose, onSaved }) {
   };
   const save = async (event) => {
     event?.preventDefault();
-    if (!validate()) return;
+    if (!validate() || photoBusy) return;
     setBusy(true);
     try {
       const saved = await api(isEditing ? `/assets/${asset._id}` : '/assets', { method: isEditing ? 'PUT' : 'POST', body: form });
@@ -103,7 +144,7 @@ export default function AssetModal({ asset, onClose, onSaved }) {
   };
   const submit = async (event) => {
     event.preventDefault();
-    if (!validate()) return;
+    if (!validate() || photoBusy) return;
     if (!isEditing) {
       setBusy(true);
       try {
@@ -163,6 +204,11 @@ export default function AssetModal({ asset, onClose, onSaved }) {
               <div className="wide"><label htmlFor="asset-description">Description / Brand / Model</label><textarea id="asset-description" rows="2" value={form.description} onChange={set('description')} placeholder="e.g. 3 Seater / Color Black" /></div>
               {isEditing && <div><label htmlFor="asset-condition">Condition</label><input id="asset-condition" maxLength="120" value={form.condition} onChange={set('condition')} placeholder="e.g. Good, worn upholstery" /></div>}
               {!isEditing && <div><label htmlFor="asset-quantity">Quantity</label><input id="asset-quantity" type="number" min="1" max="500" step="1" required value={form.quantity} onChange={set('quantity')} /><small className="field-hint">Creates one separately tracked record per physical asset.</small></div>}
+            </div></div>
+
+            <div className="form-section"><h3>{isEditing ? 'Change photo (optional)' : 'Photo (optional)'}</h3><div className="form-grid">
+              <div className="wide"><label htmlFor="asset-photo-upload">Asset photo</label><input id="asset-photo-upload" type="file" accept="image/*" onChange={selectPhoto} disabled={photoBusy || busy} /><small className="field-hint">{isEditing ? 'Choose a new image or remove the current photo.' : Number(form.quantity) > 1 ? 'A compressed photo will be attached to the first asset.' : 'Images are compressed before saving.'}</small></div>
+              {form.photoUrl && <div className="wide asset-photo-preview"><img src={form.photoUrl} alt="Asset photo preview" /><button className="btn btn-sm" type="button" disabled={busy || photoBusy} onClick={() => { setForm((current) => ({ ...current, photoUrl: '' })); const input = document.getElementById('asset-photo-upload'); if (input) input.value = ''; }}>Remove photo</button></div>}
             </div></div>
 
             <div className="form-section"><h3>Value and dates</h3><div className="form-grid">

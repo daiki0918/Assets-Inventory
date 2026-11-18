@@ -15,6 +15,7 @@ import Branches from './pages/Branches';
 import Users from './pages/Users';
 import Inventory from './pages/Inventory';
 import Alerts from './pages/Alerts';
+import AssetRequests from './pages/AssetRequests';
 import useRealtimeRefresh from './lib/useRealtimeRefresh';
 
 export default function App() {
@@ -58,6 +59,7 @@ export default function App() {
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/assets" element={<Assets />} />
+        <Route path="/asset-requests" element={<AssetRequests />} />
         <Route path="/assets/register" element={<Navigate to="/assets" replace />} />
         <Route path="/assets/import" element={<Navigate to="/assets?import=1" replace />} />
         <Route path="/assets/labels" element={<Navigate to="/assets" replace />} />

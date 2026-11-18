@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs'; import mongoose from 'mongoose'; import QRCode fr
 import crypto from 'crypto';
 import nodemailer from 'nodemailer';
 import { pathToFileURL } from 'node:url';
-import { AlertState, Asset, Branch, Cluster, InventoryScan, InventorySession, Location, PasswordResetCode, TransferRequest, User, STATUSES } from './models.js';
+import { AlertState, Asset, AssetRequest, Branch, Cluster, InventoryScan, InventorySession, Location, PasswordResetCode, TransferRequest, User, STATUSES } from './models.js';
 
 const localOrigins = ['http://localhost:5173', 'http://localhost:5174', 'https://localhost:5174'];
 const applicationOrigin = process.env.APP_URL ? new URL(process.env.APP_URL).origin : null;
@@ -15,7 +15,7 @@ export const app = express();
 app.use(cors({
   origin: (origin, callback) => callback(null, !origin || allowedOrigins.has(origin)),
 }));
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 const errorMessage = (e) => {
   if (e?.code === 11000) return `${Object.keys(e.keyPattern || e.keyValue || {}).join(', ') || 'Value'} already exists`;
   if (e?.name === 'ValidationError') return Object.values(e.errors).map((error) => error.message).join('. ');
@@ -23,6 +23,11 @@ const errorMessage = (e) => {
 };
 const wrap = (fn) => (req, res) => fn(req, res).catch((e) => res.status(e.status || 400).json({ error: errorMessage(e) }));
 const fail = (status, message) => Object.assign(new Error(message), { status });
+const validatePhotoUrl = (value) => {
+  if (value !== undefined && value !== '' && (typeof value !== 'string' || value.length > 1_200_000 || !/^data:image\/jpeg;base64,[A-Za-z0-9+/]+={0,2}$/.test(value))) {
+    throw fail(400, 'Asset photo must be a compressed JPEG image under 1.2 MB');
+  }
+};
 const validateJwtSecret = () => {
   const secret = process.env.JWT_SECRET || '';
   if (secret.length < 32 || ['change-me', 'changeme', 'secret'].includes(secret.trim().toLowerCase())) {
@@ -674,6 +679,7 @@ app.post('/api/assets/preview-tags', auth, superOnly, wrap(async (req, res) => {
 app.post('/api/assets', auth, superOnly, wrap(async (req, res) => {
   const d = req.body;
   if (!d.name?.trim()) throw fail(400, 'Asset name is required');
+  validatePhotoUrl(d.photoUrl);
   if (d.description !== undefined && typeof d.description !== 'string') throw fail(400, 'Description must be text');
   if (d.condition !== undefined && (typeof d.condition !== 'string' || d.condition.trim().length > 120)) throw fail(400, 'Condition must be 120 characters or fewer');
   const quantity = d.quantity === undefined || d.quantity === '' ? 1 : Number(d.quantity);
@@ -707,6 +713,7 @@ app.post('/api/assets', auth, superOnly, wrap(async (req, res) => {
         const qrImage = await QRCode.toDataURL(qrCodeValue, { width: 400, margin: 1 });
         return {
           name: d.name.trim(),
+          ...(index === 0 && d.photoUrl && { photoUrl: d.photoUrl }),
           category: d.category?.trim(),
           description: d.description?.trim(),
           condition: 'Good',
@@ -873,6 +880,7 @@ app.put('/api/assets/:id', auth, superOnly, wrap(async (req, res) => {
   if (a.status === 'Disposed') throw fail(409, 'Disposed assets are read-only');
   const d = req.body;
   if (!d.name?.trim()) throw fail(400, 'Asset name is required');
+  validatePhotoUrl(d.photoUrl);
   if (d.description !== undefined && typeof d.description !== 'string') throw fail(400, 'Description must be text');
   if (d.condition !== undefined && (typeof d.condition !== 'string' || d.condition.trim().length > 120)) throw fail(400, 'Condition must be 120 characters or fewer');
   if (d.purchaseDate && Number.isNaN(Date.parse(d.purchaseDate))) throw fail(400, 'Purchase date is invalid');
@@ -885,6 +893,10 @@ app.put('/api/assets/:id', auth, superOnly, wrap(async (req, res) => {
   update('name', d.name.trim(), 'Name'); update('category', d.category?.trim(), 'Category'); update('description', d.description?.trim(), 'Description'); update('condition', d.condition?.trim() || 'Good', 'Condition'); update('serialNo', d.serialNo?.trim(), 'Serial number');
   update('branch', b._id, `Branch (${b.name})`); update('cluster', b.cluster, `Cluster (${(await Cluster.findById(b.cluster).select('name').lean())?.name || ''})`); update('location', loc._id, `Location (${loc.name})`);
   update('purchaseDate', d.purchaseDate || undefined, 'Purchase date');
+  if (d.photoUrl !== undefined && (a.photoUrl || '') !== d.photoUrl) {
+    changes.push(d.photoUrl ? 'Photo updated' : 'Photo removed');
+    a.photoUrl = d.photoUrl || undefined;
+  }
   for (const k of ['cost', 'salvageValue', 'usefulLifeYears']) update(k, d[k] === '' || d[k] === undefined ? (k === 'cost' || k === 'salvageValue' ? 0 : 5) : Number(d[k]), k === 'usefulLifeYears' ? 'Useful life' : k === 'salvageValue' ? 'Salvage value' : 'Cost');
   if (changes.length) { a.history.push({ by: req.user.name, action: 'Asset details updated', note: changes.join('; ') }); await a.save(); }
   res.json(out(await pop(Asset.findById(a._id))));
@@ -917,6 +929,43 @@ const populateTransferRequest = (query) => query
 app.get('/api/transfer-requests', auth, wrap(async (req, res) => {
   const filter = req.user.role === 'superadmin' ? {} : { requestedBy: req.user.id };
   res.json(await populateTransferRequest(TransferRequest.find(filter)).sort('-createdAt').lean());
+}));
+
+const populateAssetRequest = (query) => query
+  .populate('requestedBy', 'name email')
+  .populate('branch', 'name prefix')
+  .populate('reviewedBy', 'name');
+
+app.get('/api/asset-requests', auth, wrap(async (req, res) => {
+  const filter = req.user.role === 'superadmin' ? {} : { requestedBy: req.user.id };
+  res.json(await populateAssetRequest(AssetRequest.find(filter)).sort('-createdAt').lean());
+}));
+
+app.post('/api/asset-requests', auth, wrap(async (req, res) => {
+  if (req.user.role !== 'operator') throw fail(403, 'Only branch operators can request assets');
+  const name = String(req.body.name || '').trim();
+  const category = String(req.body.category || '').trim();
+  const note = String(req.body.note || '').trim();
+  const quantity = Number(req.body.quantity);
+  if (!name || name.length > 160) throw fail(400, 'Asset name is required and must be 160 characters or fewer');
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 500) throw fail(400, 'Quantity must be a whole number from 1 to 500');
+  if (category.length > 100) throw fail(400, 'Category must be 100 characters or fewer');
+  if (note.length > 500) throw fail(400, 'Note must be 500 characters or fewer');
+  if (!req.user.branch) throw fail(400, 'Your account is not assigned to a branch');
+  const request = await AssetRequest.create({ name, category, quantity, note, requestedBy: req.user.id, branch: req.user.branch });
+  res.status(201).json(await populateAssetRequest(AssetRequest.findById(request._id)).lean());
+}));
+
+app.post('/api/asset-requests/:id/review', auth, superOnly, wrap(async (req, res) => {
+  const status = req.body.status;
+  if (!['approved', 'rejected'].includes(status)) throw fail(400, 'Review status must be approved or rejected');
+  const request = await AssetRequest.findOneAndUpdate(
+    { _id: req.params.id, status: 'pending' },
+    { $set: { status, reviewedBy: req.user.id, reviewedAt: new Date() } },
+    { new: true, runValidators: true },
+  );
+  if (!request) throw fail(409, 'This asset request is no longer pending');
+  res.json(await populateAssetRequest(AssetRequest.findById(request._id)).lean());
 }));
 
 app.post('/api/transfer-requests', auth, wrap(async (req, res) => {

@@ -72,6 +72,19 @@ const transferRequestSchema = new Schema({
 transferRequestSchema.index({ asset: 1, status: 1 });
 export const TransferRequest = model('TransferRequest', transferRequestSchema);
 
+const assetRequestSchema = new Schema({
+  name: { type: String, required: true, trim: true, maxlength: 160 },
+  category: { type: String, trim: true, maxlength: 100 },
+  quantity: { type: Number, required: true, min: 1, max: 500 },
+  note: { type: String, trim: true, maxlength: 500 },
+  requestedBy: { ...ref('User'), required: true, index: true },
+  branch: { ...ref('Branch'), required: true, index: true },
+  status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending', index: true },
+  reviewedBy: ref('User'),
+  reviewedAt: Date,
+}, { timestamps: true });
+export const AssetRequest = model('AssetRequest', assetRequestSchema);
+
 export const STATUSES = ['Active', 'Damaged', 'Missing', 'In-Transit', 'Disposed'];
 const assetSchema = new Schema({
   inventoryTag: { type: String, unique: true, required: true },
@@ -79,7 +92,7 @@ const assetSchema = new Schema({
   qrUrl: { type: String, required: true },
   qrCodeValue: { type: String },
   qrImage: { type: String, required: true },  // PNG data URL
-  name: { type: String, required: true }, category: String, description: String, serialNo: String,
+  name: { type: String, required: true }, category: String, description: String, serialNo: String, photoUrl: String,
   cluster: { ...ref('Cluster'), required: true, index: true },
   branch: { ...ref('Branch'), required: true, index: true },
   location: { ...ref('Location'), required: true },
