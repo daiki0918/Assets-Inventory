@@ -3,10 +3,10 @@ import { api } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
 import { downloadWorkbook } from '../lib/xlsxDownload';
 
-const columns = ['Inventory tag', 'Quantity', 'Asset name', 'Category', 'Description / Brand / Model', 'Serial number', 'Cluster', 'Branch', 'Location', 'Condition', 'Status', 'Purchase date', 'Cost (PHP)', 'Salvage value (PHP)', 'Useful life (years)', 'Book value (PHP)'];
+const columns = ['Inventory tag', 'Quantity', 'Asset name', 'Category', 'Brand / manufacturer', 'Model number', 'Asset type', 'Description', 'Serial number', 'Cluster', 'Branch', 'Location', 'Condition', 'Status', 'Purchase date', 'Cost (PHP)', 'Salvage value (PHP)', 'Useful life (years)', 'Book value (PHP)'];
 const normalize = (value) => String(value ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const fieldMap = {
-  inventory: 'inventoryTag', inventorytag: 'inventoryTag', quantity: 'quantity', qty: 'quantity', name: 'name', assetname: 'name', category: 'category', description: 'description', brand: 'description', model: 'description', descriptionbrandmodel: 'description', serialnum: 'serialNo', serialnumber: 'serialNo',
+  inventory: 'inventoryTag', inventorytag: 'inventoryTag', quantity: 'quantity', qty: 'quantity', name: 'name', assetname: 'name', category: 'category', description: 'description', descriptionbrandmodel: 'description', brand: 'brand', brandmanufacturer: 'brand', model: 'modelNo', modelnumber: 'modelNo', assettype: 'assetType', serialnum: 'serialNo', serialnumber: 'serialNo',
   cluster: 'cluster', branch: 'branch', location: 'location', condition: 'condition', status: 'status', purchasedate: 'purchaseDate',
   cost: 'cost', costphp: 'cost', salvagevalue: 'salvageValue', salvagevaluephp: 'salvageValue',
   usefullife: 'usefulLifeYears', usefullifeyears: 'usefulLifeYears', bookvalue: 'bookValue', bookvaluephp: 'bookValue',
@@ -45,6 +45,9 @@ function validate(row, branches, locations) {
   if (!String(row.name || '').trim()) errors.push('Name is required');
   if (!String(row.branch || '').trim()) errors.push('Branch is required');
   if (!String(row.location || '').trim()) errors.push('Location is required');
+  for (const [field, label, limit] of [['category', 'Category', 160], ['brand', 'Brand', 160], ['modelNo', 'Model number', 160], ['assetType', 'Asset type', 160], ['serialNo', 'Serial number', 160]]) {
+    if (String(row[field] || '').trim().length > limit) errors.push(`${label} must be ${limit} characters or fewer.`);
+  }
   const branchValue = String(row.branch || '').trim().toLowerCase();
   const branch = branches.find((item) => item.name.toLowerCase() === branchValue || item.prefix.toLowerCase() === branchValue);
   if (branchValue && !branch) errors.push(`Branch "${row.branch}" not found. Use a branch name or code, such as CARCAR or CCR.`);
@@ -97,7 +100,7 @@ export default function ImportModal({ onClose, onImported }) {
       ['Replace the sample row with your details. Enter how many items you have; the system will create a separate record and code for each one. Use the full branch name or branch code. Cost is per item; the serial number is used for the first item only.'],
       [],
       columns,
-      ['', 3, 'Sample asset', 'Furniture', '3 Seater / Color Black', 'SN-123', 'SOUTH', 'CARCAR', 'OFFICE', 'Good', 'Active', new Date(2025, 0, 15), 0, 0, 5, 0],
+      ['', 1, 'Sample asset', 'Furniture', 'Example brand', 'Model 100', 'Office equipment', '3 Seater / Color Black', 'SN-123', 'SOUTH', 'CARCAR', 'OFFICE', 'Good', 'Active', new Date(2025, 0, 15), 0, 0, 5, 0],
     ];
     const worksheet = utils.aoa_to_sheet(worksheetData);
     const columnCount = columns.length;
@@ -112,7 +115,7 @@ export default function ImportModal({ onClose, onImported }) {
       font: { name: 'Aptos Display', bold: true, color: { rgb: 'FFFFFF' }, sz: 17 },
       alignment: { vertical: 'center', horizontal: 'left', indent: 1 },
     };
-    const widths = [19, 12, 30, 20, 32, 21, 22, 22, 22, 18, 18, 17, 18, 21, 20, 20];
+    const widths = [19, 12, 30, 20, 24, 21, 20, 32, 21, 22, 22, 22, 18, 18, 17, 18, 21, 20, 20];
     worksheet['!merges'] = [0, 1, 2, 3].map((row) => ({
       s: { r: row, c: 0 },
       e: { r: row, c: columnCount - 1 },
@@ -148,14 +151,14 @@ export default function ImportModal({ onClose, onImported }) {
         border: { bottom: { style: 'thin', color: { rgb: 'E6EAF2' } } },
       });
     }
-    setCellStyle(6, 11, {
+    setCellStyle(6, 14, {
       fill: { patternType: 'solid', fgColor: { rgb: 'F4F7FC' } },
       font: { name: 'Aptos', color: { rgb: '253149' }, sz: 10 },
       alignment: { vertical: 'center', horizontal: 'center' },
       numFmt: 'dd mmm yyyy',
       border: { bottom: { style: 'thin', color: { rgb: 'E6EAF2' } } },
     });
-    [12, 13, 15].forEach((column) => {
+    [15, 16, 18].forEach((column) => {
       setCellStyle(6, column, {
         fill: { patternType: 'solid', fgColor: { rgb: 'F4F7FC' } },
         font: { name: 'Aptos', color: { rgb: '253149' }, sz: 10 },

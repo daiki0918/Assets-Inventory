@@ -92,7 +92,8 @@ const assetSchema = new Schema({
   qrUrl: { type: String, required: true },
   qrCodeValue: { type: String },
   qrImage: { type: String, required: true },  // PNG data URL
-  name: { type: String, required: true }, category: String, description: String, serialNo: String, photoUrl: String,
+  name: { type: String, required: true }, category: String, description: String, brand: String, modelNo: String, assetType: String, serialNo: String, photoUrl: String,
+  serialNoKey: { type: String, unique: true, sparse: true, select: false },
   cluster: { ...ref('Cluster'), required: true, index: true },
   branch: { ...ref('Branch'), required: true, index: true },
   location: { ...ref('Location'), required: true },

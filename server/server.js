@@ -17,15 +17,121 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '2mb' }));
 const errorMessage = (e) => {
-  if (e?.code === 11000) return `${Object.keys(e.keyPattern || e.keyValue || {}).join(', ') || 'Value'} already exists`;
+  if (e?.code === 11000) {
+    if (e.keyPattern?.serialNoKey || e.keyValue?.serialNoKey) return 'That serial number is already registered. Check the existing asset before saving.';
+    return `${Object.keys(e.keyPattern || e.keyValue || {}).join(', ') || 'Value'} already exists`;
+  }
   if (e?.name === 'ValidationError') return Object.values(e.errors).map((error) => error.message).join('. ');
   return e?.message || 'The request could not be completed';
 };
 const wrap = (fn) => (req, res) => fn(req, res).catch((e) => res.status(e.status || 400).json({ error: errorMessage(e) }));
 const fail = (status, message) => Object.assign(new Error(message), { status });
+const normalizeSerialNo = (value) => String(value || '').trim().toLocaleLowerCase('en-US');
+const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const validateAssetText = (data, key, label, maxLength) => {
+  if (data[key] !== undefined && (typeof data[key] !== 'string' || (maxLength && data[key].trim().length > maxLength))) {
+    throw fail(400, maxLength ? `${label} must be text no longer than ${maxLength} characters` : `${label} must be text`);
+  }
+};
+const assertSerialAvailable = async (value, { excludeId, session } = {}) => {
+  const serialNo = String(value || '').trim();
+  if (!serialNo) return;
+  const query = Asset.findOne({
+    serialNo: { $regex: `^\\s*${escapeRegex(serialNo)}\\s*$`, $options: 'i' },
+    ...(excludeId && { _id: { $ne: excludeId } }),
+  }).select('_id');
+  if (session) query.session(session);
+  if (await query.lean()) throw fail(409, 'That serial number is already registered. Check the existing asset before saving.');
+};
 const validatePhotoUrl = (value) => {
   if (value !== undefined && value !== '' && (typeof value !== 'string' || value.length > 1_200_000 || !/^data:image\/jpeg;base64,[A-Za-z0-9+/]+={0,2}$/.test(value))) {
     throw fail(400, 'Asset photo must be a compressed JPEG image under 1.2 MB');
+  }
+};
+const ASSET_ANALYSIS_LIMIT = 8;
+const ASSET_ANALYSIS_WINDOW_MS = 60_000;
+const assetAnalysisRequests = new Map();
+const checkAssetAnalysisLimit = (userId) => {
+  const now = Date.now();
+  const recent = (assetAnalysisRequests.get(String(userId)) || []).filter((time) => now - time < ASSET_ANALYSIS_WINDOW_MS);
+  if (recent.length >= ASSET_ANALYSIS_LIMIT) throw fail(429, 'Scan limit reached. Wait a minute before analyzing another photo.');
+  recent.push(now);
+  assetAnalysisRequests.set(String(userId), recent);
+};
+const analyzeAssetImage = async (image) => {
+  if (!process.env.GEMINI_API_KEY || !process.env.GEMINI_VISION_MODEL) {
+    throw fail(503, 'Gemini scanning is not configured. Add GEMINI_API_KEY and GEMINI_VISION_MODEL on the server.');
+  }
+  const fields = ['name', 'category', 'brand', 'modelNo', 'serialNo', 'description', 'assetType', 'condition'];
+  const schema = {
+    type: 'object',
+    additionalProperties: false,
+    properties: Object.fromEntries(fields.map((field) => [field, { type: 'string' }])),
+    required: fields,
+  };
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60_000);
+  try {
+    const imageData = image.slice(image.indexOf(',') + 1);
+    const model = encodeURIComponent(process.env.GEMINI_VISION_MODEL);
+    const requestBody = JSON.stringify({
+        contents: [{
+          role: 'user',
+          parts: [
+            { text: 'Read this asset photo and extract only information supported by visible text or clear visual evidence. Never guess a brand, model, or serial number. Leave any unreadable or uncertain field as an empty string. For serialNo, copy the label exactly. Describe visible condition only when damage or wear is clear; otherwise leave it empty. Return concise values.' },
+            { inlineData: { mimeType: 'image/jpeg', data: imageData } },
+          ],
+        }],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseJsonSchema: schema,
+          thinkingConfig: { thinkingLevel: 'low' },
+          maxOutputTokens: 500,
+        },
+      });
+    let response;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: { 'x-goog-api-key': process.env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
+        body: requestBody,
+      });
+      if (response.status !== 503 || attempt === 2) break;
+      await response.body?.cancel().catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 1000 * (2 ** attempt)));
+    }
+    const result = await response.json().catch(() => null);
+    if (!response.ok) {
+      const providerError = result?.error || {};
+      const code = typeof providerError.status === 'string' ? providerError.status : String(providerError.code || '');
+      const detail = typeof providerError.message === 'string'
+        ? providerError.message.replaceAll(process.env.GEMINI_API_KEY, '[redacted]').slice(0, 240)
+        : '';
+      if (response.status === 401 || code === 'UNAUTHENTICATED' || /API key (is )?not valid|invalid API key/i.test(detail)) {
+        throw fail(502, 'Gemini rejected GEMINI_API_KEY. Check that it is a Gemini API key from Google AI Studio, then restart the API. You can still register manually.');
+      }
+      if (response.status === 403 || response.status === 404 || code === 'PERMISSION_DENIED' || code === 'NOT_FOUND') {
+        throw fail(502, `Gemini could not access the configured model. Check GEMINI_VISION_MODEL and that the Google AI project allows Gemini API access.${detail ? ` ${detail}` : ''} You can still register manually.`);
+      }
+      if (response.status === 429 || code === 'RESOURCE_EXHAUSTED') {
+        throw fail(502, `Gemini reported a quota or rate limit issue${code ? ` (${code})` : ''}. Check the Google AI project usage and billing.${detail ? ` ${detail}` : ''} You can still register manually.`);
+      }
+      if (response.status === 503 || code === 'UNAVAILABLE') {
+        throw fail(502, 'Gemini is temporarily overloaded (503). The app retried twice; wait briefly and try again. You can still register this asset manually.');
+      }
+      throw fail(502, `Gemini analysis failed (HTTP ${response.status}${code ? `, ${code}` : ''})${detail ? `: ${detail}` : '.'} You can still register manually.`);
+    }
+    const output = result.candidates?.[0]?.content?.parts?.find((part) => typeof part.text === 'string')?.text;
+    if (!output) throw fail(502, 'AI could not read this photo. Retake it or enter the details manually.');
+    const parsed = JSON.parse(output);
+    return Object.fromEntries(fields.map((field) => [field, typeof parsed[field] === 'string' ? parsed[field].trim().slice(0, field === 'description' ? 500 : 160) : '']));
+  } catch (error) {
+    if (error.status) throw error;
+    if (error.name === 'AbortError') throw fail(504, 'AI analysis timed out. Retake the photo or enter the details manually.');
+    throw fail(502, 'AI analysis failed. You can still register this asset manually.');
+  } finally {
+    clearTimeout(timeoutId);
   }
 };
 const validateJwtSecret = () => {
@@ -676,11 +782,24 @@ app.post('/api/assets/preview-tags', auth, superOnly, wrap(async (req, res) => {
   res.json({ tags: await findAvailableAssetTags(branch, quantity) });
 }));
 
+app.post('/api/assets/analyze', auth, superOnly, wrap(async (req, res) => {
+  validatePhotoUrl(req.body.image);
+  if (!req.body.image) throw fail(400, 'Capture an asset photo first.');
+  checkAssetAnalysisLimit(req.user.id);
+  res.json(await analyzeAssetImage(req.body.image));
+}));
+
 app.post('/api/assets', auth, superOnly, wrap(async (req, res) => {
   const d = req.body;
   if (!d.name?.trim()) throw fail(400, 'Asset name is required');
   validatePhotoUrl(d.photoUrl);
-  if (d.description !== undefined && typeof d.description !== 'string') throw fail(400, 'Description must be text');
+  validateAssetText(d, 'category', 'Category', 160);
+  validateAssetText(d, 'brand', 'Brand', 160);
+  validateAssetText(d, 'modelNo', 'Model number', 160);
+  validateAssetText(d, 'assetType', 'Asset type', 160);
+  validateAssetText(d, 'description', 'Description');
+  validateAssetText(d, 'serialNo', 'Serial number', 160);
+  await assertSerialAvailable(d.serialNo);
   if (d.condition !== undefined && (typeof d.condition !== 'string' || d.condition.trim().length > 120)) throw fail(400, 'Condition must be 120 characters or fewer');
   const quantity = d.quantity === undefined || d.quantity === '' ? 1 : Number(d.quantity);
   if (!Number.isInteger(quantity) || quantity < 1 || quantity > 500) throw fail(400, 'Quantity must be a whole number between 1 and 500');
@@ -704,9 +823,11 @@ app.post('/api/assets', auth, superOnly, wrap(async (req, res) => {
       if (!await Location.exists({ _id: location._id, branch: allocated._id }).session(session)) {
         throw fail(400, 'Location does not belong to that branch');
       }
+      await assertSerialAvailable(d.serialNo, { session });
       const qrBaseUrl = process.env.APP_URL?.replace(/\/+$/, '') || 'http://localhost:5173';
       const documents = await Promise.all(Array.from({ length: quantity }, async (_, index) => {
         const inventoryTag = inventoryTags[index];
+        const serialNo = index === 0 ? String(d.serialNo || '').trim() : '';
         const qrToken = crypto.randomBytes(16).toString('hex');
         const qrUrl = `${qrBaseUrl}/a/${qrToken}`;
         const qrCodeValue = inventoryTag;
@@ -715,9 +836,13 @@ app.post('/api/assets', auth, superOnly, wrap(async (req, res) => {
           name: d.name.trim(),
           ...(index === 0 && d.photoUrl && { photoUrl: d.photoUrl }),
           category: d.category?.trim(),
+          brand: d.brand?.trim(),
+          modelNo: d.modelNo?.trim(),
+          assetType: d.assetType?.trim(),
           description: d.description?.trim(),
-          condition: 'Good',
-          serialNo: index === 0 ? d.serialNo?.trim() : '',
+          condition: d.condition === undefined ? 'Good' : d.condition.trim(),
+          serialNo,
+          ...(normalizeSerialNo(serialNo) && { serialNoKey: normalizeSerialNo(serialNo) }),
           ...(d.purchaseDate && { purchaseDate: d.purchaseDate }),
           cost: d.cost === undefined || d.cost === '' ? 0 : Number(d.cost),
           salvageValue: d.salvageValue === undefined || d.salvageValue === '' ? 0 : Number(d.salvageValue),
@@ -790,7 +915,11 @@ app.post('/api/assets/import', auth, superOnly, wrap(async (req, res) => {
       const quantity = d.quantity === '' || d.quantity === undefined ? 1 : Number(d.quantity);
       if (!Number.isInteger(quantity) || quantity < 1 || quantity > 500) throw fail(400, 'Quantity must be a whole number from 1 to 500');
       if (d.status && !STATUSES.includes(String(d.status))) throw fail(400, `Invalid status: ${d.status}`);
-      if (d.description !== undefined && typeof d.description !== 'string') throw fail(400, 'Description must be text');
+      validateAssetText(d, 'brand', 'Brand', 160);
+      validateAssetText(d, 'modelNo', 'Model number', 160);
+      validateAssetText(d, 'assetType', 'Asset type', 160);
+      validateAssetText(d, 'description', 'Description');
+      validateAssetText(d, 'serialNo', 'Serial number', 160);
       if (d.condition !== undefined && (typeof d.condition !== 'string' || d.condition.trim().length > 120)) throw fail(400, 'Condition must be 120 characters or fewer');
       if (d.status === 'Disposed' && !d.disposalDate) throw fail(400, 'Disposal date is required for disposed assets');
       if (d.purchaseDate && Number.isNaN(Date.parse(d.purchaseDate))) throw fail(400, 'Purchase date is invalid');
@@ -820,6 +949,15 @@ app.post('/api/assets/import', auth, superOnly, wrap(async (req, res) => {
   let createdCount = 0;
   try {
     await session.withTransaction(async () => {
+      const importSerials = new Set();
+      for (const { data } of prepared) {
+        const serialNo = String(data.serialNo || '').trim();
+        if (!serialNo) continue;
+        const key = normalizeSerialNo(serialNo);
+        if (importSerials.has(key)) throw fail(409, `Serial number ${serialNo} appears more than once in the import.`);
+        importSerials.add(key);
+        await assertSerialAvailable(serialNo, { session });
+      }
       const quantityByBranch = new Map();
       for (const row of prepared) {
         const key = String(row.branch._id);
@@ -845,9 +983,13 @@ app.post('/api/assets/import', auth, superOnly, wrap(async (req, res) => {
           documents.push({
             name: data.name.trim(),
             category: data.category?.trim(),
+            brand: data.brand?.trim(),
+            modelNo: data.modelNo?.trim(),
+            assetType: data.assetType?.trim(),
             description: data.description?.trim(),
             condition: data.condition?.trim() || 'Good',
             serialNo: index === 0 ? data.serialNo?.trim() : '',
+            ...(index === 0 && normalizeSerialNo(data.serialNo) && { serialNoKey: normalizeSerialNo(data.serialNo) }),
             ...(data.purchaseDate && { purchaseDate: data.purchaseDate }),
             cost: data.cost === undefined || data.cost === '' ? 0 : Number(data.cost),
             salvageValue: data.salvageValue === undefined || data.salvageValue === '' ? 0 : Number(data.salvageValue),
@@ -881,7 +1023,12 @@ app.put('/api/assets/:id', auth, superOnly, wrap(async (req, res) => {
   const d = req.body;
   if (!d.name?.trim()) throw fail(400, 'Asset name is required');
   validatePhotoUrl(d.photoUrl);
-  if (d.description !== undefined && typeof d.description !== 'string') throw fail(400, 'Description must be text');
+  validateAssetText(d, 'category', 'Category', 160);
+  validateAssetText(d, 'brand', 'Brand', 160);
+  validateAssetText(d, 'modelNo', 'Model number', 160);
+  validateAssetText(d, 'assetType', 'Asset type', 160);
+  validateAssetText(d, 'description', 'Description');
+  validateAssetText(d, 'serialNo', 'Serial number', 160);
   if (d.condition !== undefined && (typeof d.condition !== 'string' || d.condition.trim().length > 120)) throw fail(400, 'Condition must be 120 characters or fewer');
   if (d.purchaseDate && Number.isNaN(Date.parse(d.purchaseDate))) throw fail(400, 'Purchase date is invalid');
   for (const k of ['cost', 'salvageValue']) if (d[k] !== undefined && d[k] !== '' && (!Number.isFinite(Number(d[k])) || Number(d[k]) < 0)) throw fail(400, `${k === 'cost' ? 'Cost' : 'Salvage value'} must be a non-negative number`);
@@ -890,7 +1037,13 @@ app.put('/api/assets/:id', auth, superOnly, wrap(async (req, res) => {
   const loc = await Location.findOne({ _id: d.location, branch: b._id }); if (!loc) throw fail(400, 'Location does not belong to that branch');
   const changes = [];
   const update = (field, value, label = field) => { const old = a[field] == null ? '' : String(a[field]); const next = value == null ? '' : String(value); if (old !== next) { changes.push(`${label}: ${old || '(empty)'} → ${next || '(empty)'}`); a[field] = value; } };
-  update('name', d.name.trim(), 'Name'); update('category', d.category?.trim(), 'Category'); update('description', d.description?.trim(), 'Description'); update('condition', d.condition?.trim() || 'Good', 'Condition'); update('serialNo', d.serialNo?.trim(), 'Serial number');
+  update('name', d.name.trim(), 'Name'); update('category', d.category?.trim(), 'Category'); update('brand', d.brand?.trim(), 'Brand'); update('modelNo', d.modelNo?.trim(), 'Model number'); update('assetType', d.assetType?.trim(), 'Asset type'); update('description', d.description?.trim(), 'Description'); update('condition', d.condition?.trim() || 'Good', 'Condition');
+  const serialNo = String(d.serialNo || '').trim();
+  if (serialNo !== String(a.serialNo || '').trim()) {
+    await assertSerialAvailable(serialNo, { excludeId: a._id });
+    update('serialNo', serialNo, 'Serial number');
+    a.serialNoKey = normalizeSerialNo(serialNo) || undefined;
+  }
   update('branch', b._id, `Branch (${b.name})`); update('cluster', b.cluster, `Cluster (${(await Cluster.findById(b.cluster).select('name').lean())?.name || ''})`); update('location', loc._id, `Location (${loc.name})`);
   update('purchaseDate', d.purchaseDate || undefined, 'Purchase date');
   if (d.photoUrl !== undefined && (a.photoUrl || '') !== d.photoUrl) {
@@ -1231,7 +1384,7 @@ const assetQuery = (req) => {
   }
   if (req.query.q) {
     const text = new RegExp(req.query.q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-    q.$or = [{ inventoryTag: text }, { name: text }, { description: text }, { serialNo: text }];
+    q.$or = [{ inventoryTag: text }, { name: text }, { category: text }, { brand: text }, { modelNo: text }, { assetType: text }, { description: text }, { serialNo: text }];
   }
   if (req.query.purchaseFrom || req.query.purchaseTo) {
     q.purchaseDate = {};
@@ -1291,8 +1444,8 @@ const csv = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
 app.get('/api/assets/export', auth, wrap(async (req, res) => {
   const assets = await pop(Asset.find(assetQuery(req)).sort('inventoryTag'));
   const lines = [
-    ['Inventory tag', 'Name', 'Category', 'Description / Brand / Model', 'Serial number', 'Cluster', 'Branch', 'Location', 'Condition', 'Status', 'Purchase date', 'Cost', 'Salvage value', 'Useful life', 'Book value'],
-    ...assets.map((a) => [a.inventoryTag, a.name, a.category, a.description, a.serialNo, a.cluster?.name, a.branch?.name, a.location?.name, a.condition, a.status, a.purchaseDate?.toISOString().slice(0, 10), a.cost, a.salvageValue, a.usefulLifeYears, a.bookValue()]),
+    ['Inventory tag', 'Name', 'Category', 'Brand / manufacturer', 'Model number', 'Asset type', 'Description', 'Serial number', 'Cluster', 'Branch', 'Location', 'Condition', 'Status', 'Purchase date', 'Cost', 'Salvage value', 'Useful life', 'Book value'],
+    ...assets.map((a) => [a.inventoryTag, a.name, a.category, a.brand, a.modelNo, a.assetType, a.description, a.serialNo, a.cluster?.name, a.branch?.name, a.location?.name, a.condition, a.status, a.purchaseDate?.toISOString().slice(0, 10), a.cost, a.salvageValue, a.usefulLifeYears, a.bookValue()]),
   ];
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', 'attachment; filename="assets.csv"');
@@ -1309,7 +1462,11 @@ app.get('/api/assets/qr/:token', auth, wrap(async (req, res) => {
 app.post('/api/assets/resolve-qr', auth, wrap(async (req, res) => {
   const code = parseQrCode(req.body.code);
   if (!code) throw fail(400, 'Enter or scan a QR code');
-  const asset = await pop(Asset.findOne({ $or: [{ qrToken: code }, { inventoryTag: code }] }));
+  if (code.length > 300) throw fail(400, 'Scanned code is too long.');
+  const asset = await pop(Asset.findOne({ $or: [
+    { qrToken: code }, { inventoryTag: code },
+    { serialNo: { $regex: `^\\s*${escapeRegex(code)}\\s*$`, $options: 'i' } },
+  ] }));
   if (asset && !sameBranch(req.user, { branch: asset.branch._id })) throw fail(403, 'This asset belongs to another branch');
   res.json({ asset: asset ? out(asset) : null });
 }));
@@ -1422,5 +1579,6 @@ app.post('/api/assets/:id/audit', auth, wrap(async (req, res) => {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   validateJwtSecret();
   await mongoose.connect(process.env.MONGODB_URI);
+  await Asset.collection.createIndex({ serialNoKey: 1 }, { unique: true, sparse: true });
   app.listen(process.env.PORT || 4000, '0.0.0.0', () => console.log('API ready'));
 }

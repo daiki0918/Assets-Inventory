@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { api, getToken, peso } from '../lib/api';
 import AssetModal from '../components/AssetModal';
+import MobileAssetScanner from '../components/MobileAssetScanner';
 import Empty from '../components/Empty';
 import PageHeader from '../components/PageHeader';
 import Status from '../components/Status';
@@ -34,6 +35,7 @@ export default function Assets() {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [modal, setModal] = useState(null);
+  const [scanOpen, setScanOpen] = useState(false);
   const [error, setError] = useState('');
   const [importing, setImporting] = useState(searchParams.get('import') === '1');
   const [labelsOpen, setLabelsOpen] = useState(false);
@@ -84,20 +86,23 @@ export default function Assets() {
       const { default: XLSX } = await import('xlsx-js-style');
       const generatedAt = new Date();
       const headers = [
-        'Inventory tag', 'Asset name', 'Category', 'Description / Brand / Model', 'Serial number', 'Cluster', 'Branch',
-        'Location', 'Condition', 'Status', 'Purchase date', 'Cost (PHP)', 'Salvage value (PHP)',
+        'Inventory tag', 'Asset name', 'Category', 'Brand / manufacturer', 'Model number', 'Asset type', 'Description', 'Serial number',
+        'Cluster', 'Branch', 'Location', 'Condition', 'Status', 'Purchase date', 'Cost (PHP)', 'Salvage value (PHP)',
         'Useful life (years)', 'Book value (PHP)',
       ];
       const assetRows = assets.map((asset) => [
         asset.inventoryTag || '',
         asset.name || '',
         asset.category || '',
+        asset.brand || '',
+        asset.modelNo || '',
+        asset.assetType || '',
         asset.description || '',
         asset.serialNo || '',
         asset.cluster?.name || '',
         asset.branch?.name || '',
         asset.location?.name || '',
-        asset.condition || 'Good',
+        asset.condition || '',
         asset.status || 'Unknown',
         asset.purchaseDate ? new Date(asset.purchaseDate) : '',
         Number(asset.cost || 0),
@@ -156,8 +161,8 @@ export default function Assets() {
         e: { r: row, c: columnCount - 1 },
       }));
       register['!cols'] = [
-        { wch: 19 }, { wch: 30 }, { wch: 20 }, { wch: 32 }, { wch: 21 }, { wch: 22 }, { wch: 22 },
-        { wch: 22 }, { wch: 18 }, { wch: 18 }, { wch: 17 }, { wch: 18 }, { wch: 21 }, { wch: 20 }, { wch: 20 },
+        { wch: 19 }, { wch: 30 }, { wch: 20 }, { wch: 24 }, { wch: 21 }, { wch: 20 }, { wch: 32 }, { wch: 21 },
+        { wch: 22 }, { wch: 22 }, { wch: 22 }, { wch: 18 }, { wch: 18 }, { wch: 17 }, { wch: 18 }, { wch: 21 }, { wch: 20 }, { wch: 20 },
       ];
       register['!rows'] = [{ hpt: 31 }, { hpt: 24 }, { hpt: 21 }, { hpt: 21 }, { hpt: 9 }, { hpt: 32 }];
       register['!autofilter'] = { ref: `A6:${finalColumn}${Math.max(6, registerData.length)}` };
@@ -199,21 +204,21 @@ export default function Assets() {
             alignment: { vertical: 'center' },
             border: { bottom: { style: 'thin', color: { rgb: 'E6EAF2' } } },
           };
-          if ([11, 12, 14].includes(column)) {
+          if ([14, 15, 17].includes(column)) {
             style.numFmt = '"₱"#,##0.00;[Red]("₱"#,##0.00);-';
             style.alignment.horizontal = 'right';
-          } else if (column === 10) {
+          } else if (column === 13) {
             style.numFmt = 'dd mmm yyyy';
             style.alignment.horizontal = 'center';
-          } else if (column === 13) {
+          } else if (column === 16) {
             style.numFmt = '0.0';
             style.alignment.horizontal = 'center';
           }
           setCellStyle(register, row, column, style);
         }
         register['!rows'][row] = { hpt: 22 };
-        const statusCell = XLSX.utils.encode_cell({ r: row, c: 9 });
-        const [statusFill, statusText] = statusColors[assetRows[row - 6][9]] || ['EAF0FF', '304CC6'];
+        const statusCell = XLSX.utils.encode_cell({ r: row, c: 12 });
+        const [statusFill, statusText] = statusColors[assetRows[row - 6][12]] || ['EAF0FF', '304CC6'];
         register[statusCell].s = {
           fill: { patternType: 'solid', fgColor: { rgb: statusFill } },
           font: { name: 'Aptos', bold: true, color: { rgb: statusText }, sz: 10 },
@@ -308,11 +313,11 @@ export default function Assets() {
     try { await api(`/assets/${deleteTarget._id}`, { method: 'DELETE' }); setDeleteTarget(null); await load(); } catch (e) { setError(e.message); } finally { setDeleteBusy(false); }
   };
   const closeImport = () => { setImporting(false); if (searchParams.has('import')) setSearchParams({}); };
-  return <><PageHeader eyebrow={user.role === 'superadmin' ? 'Inventory · All branches' : 'Inventory · Your branch'} title="All assets" description={rows ? `${rows.length} records` : 'Loading records…'} action={<><button className="btn compact-action" onClick={() => setSearchParams({ import: '1' })}>Import</button><button className="btn compact-action" onClick={() => setLabelsOpen(true)} disabled={!rows?.length}>QR labels</button><button className="btn compact-action" onClick={exportExcel} disabled={exporting}>{exporting ? 'Preparing Excel…' : 'Export Excel'}</button>{user.role === 'superadmin' && <button className="btn blue" onClick={() => setModal({})}>Register asset</button>}</>} />
+  return <><PageHeader eyebrow={user.role === 'superadmin' ? 'Inventory · All branches' : 'Inventory · Your branch'} title="All assets" description={rows ? `${rows.length} records` : 'Loading records…'} action={<>{user.role === 'superadmin' && <button className="btn blue asset-scan-action" type="button" onClick={() => setScanOpen(true)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M14 4h-4L8 7H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-1-3Z"/><circle cx="12" cy="13" r="3.5"/></svg>Scan Asset</button>}<button className="btn compact-action" onClick={() => setSearchParams({ import: '1' })}>Import</button><button className="btn compact-action" onClick={() => setLabelsOpen(true)} disabled={!rows?.length}>QR labels</button><button className="btn compact-action" onClick={exportExcel} disabled={exporting}>{exporting ? 'Preparing Excel…' : 'Export Excel'}</button>{user.role === 'superadmin' && <button className="btn blue" onClick={() => setModal({})}>Register asset</button>}</>} />
     {error && <div className="inline-error" role="alert">{error}<button onClick={() => { setError(''); load(); }}>Retry</button></div>}
-    <div className="asset-toolbar"><div className="search-field"><span aria-hidden="true">⌕</span><input aria-label="Search assets" placeholder="Search tags, names, or serials" value={query} onChange={(e) => setQuery(e.target.value)} /></div><button className="btn" type="button" onClick={openFilters}>Filters <span className="filter-count">{activeFilterCount}</span></button></div>
+    <div className="asset-toolbar"><div className="search-field"><span aria-hidden="true">⌕</span><input aria-label="Search assets" placeholder="Search tags, names, brands, models, or serials" value={query} onChange={(e) => setQuery(e.target.value)} /></div><button className="btn" type="button" onClick={openFilters}>Filters <span className="filter-count">{activeFilterCount}</span></button></div>
     <div className="chips"><button className={`chip ${!status ? 'on' : ''}`} onClick={() => setStatus('')}>All</button>{meta.statuses.map((item) => <button className={`chip ${status === item ? 'on' : ''}`} key={item} onClick={() => setStatus(item)}><span className={`dot ${item}`} />{item}</button>)}</div>
-    <div className="table-card"><div className="table-head"><span>Asset</span><span>Branch / location</span><span>Status</span><span>Cost</span><span>Book value</span>{user.role === 'superadmin' && <span>Action</span>}</div>{visibleRows.map((asset) => <Link className={`asset-row ${user.role === 'superadmin' ? 'has-action' : ''}`} key={asset._id} to={`/a/${asset.qrToken}`}><span className="asset-identity" data-label="Asset"><b className="tagc">{asset.inventoryTag}</b><small className="asset-meta"><strong>{asset.name}</strong><em>{asset.category || 'Uncategorized'}</em>{asset.description && <em>{asset.description}</em>}</small></span><span data-label="Branch / location"><strong>{asset.branch?.name || 'Unassigned'}</strong><small>{asset.location?.name || 'No location'}</small></span><span className="asset-row-status" data-label="Status"><Status value={asset.status} /><small>Condition: {asset.condition || 'Good'}</small><small>{asset.purchaseDate ? new Date(asset.purchaseDate).toLocaleDateString('en-PH') : 'No purchase date'}</small></span><span data-label="Cost" className={!asset.cost ? 'missing-value' : ''}>{asset.cost ? peso(asset.cost) : 'Missing'}</span><span data-label="Book value">{peso(asset.bookValue)}</span>{user.role === 'superadmin' && <span className="asset-row-action" data-label="Action"><button className="btn btn-sm btn-danger-ghost" type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); setDeleteTarget(asset); }}>Delete</button></span>}</Link>)}{rows && !rows.length && <Empty title="No assets found" text="Try changing your search or filters." />}</div>
+    <div className="table-card"><div className="table-head"><span>Asset</span><span>Branch / location</span><span>Status</span><span>Cost</span><span>Book value</span>{user.role === 'superadmin' && <span>Action</span>}</div>{visibleRows.map((asset) => <Link className={`asset-row ${user.role === 'superadmin' ? 'has-action' : ''}`} key={asset._id} to={`/a/${asset.qrToken}`}><span className="asset-identity" data-label="Asset"><b className="tagc">{asset.inventoryTag}</b><small className="asset-meta"><strong>{asset.name}</strong><em>{asset.category || 'Uncategorized'}</em>{(asset.brand || asset.modelNo) && <em>{[asset.brand, asset.modelNo].filter(Boolean).join(' · ')}</em>}{asset.assetType && <em>{asset.assetType}</em>}{asset.description && <em>{asset.description}</em>}</small></span><span data-label="Branch / location"><strong>{asset.branch?.name || 'Unassigned'}</strong><small>{asset.location?.name || 'No location'}</small></span><span className="asset-row-status" data-label="Status"><Status value={asset.status} /><small>{asset.condition ? `Condition: ${asset.condition}` : 'Condition not recorded'}</small><small>{asset.purchaseDate ? new Date(asset.purchaseDate).toLocaleDateString('en-PH') : 'No purchase date'}</small></span><span data-label="Cost" className={!asset.cost ? 'missing-value' : ''}>{asset.cost ? peso(asset.cost) : 'Missing'}</span><span data-label="Book value">{peso(asset.bookValue)}</span>{user.role === 'superadmin' && <span className="asset-row-action" data-label="Action"><button className="btn btn-sm btn-danger-ghost" type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); setDeleteTarget(asset); }}>Delete</button></span>}</Link>)}{rows && !rows.length && <Empty title="No assets found" text="Try changing your search or filters." />}</div>
     <Pagination page={page} pageSize={pageSize} total={rows?.length || 0} onChange={setPage} />
     {filtersOpen && <DrawerPortal><div className="modal-backdrop asset-drawer-backdrop is-open" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setFiltersOpen(false)}><aside className="asset-drawer" role="dialog" aria-modal="true" aria-labelledby="asset-filters-title"><header className="asset-drawer-header"><div className="modal-heading"><p className="eyebrow">Refine inventory</p><h2 id="asset-filters-title">Filter assets</h2><p className="sub">Combine filters to narrow the asset list.</p></div><button className="modal-close" type="button" onClick={() => setFiltersOpen(false)} aria-label="Close filters">×</button></header><form className="asset-drawer-form" onSubmit={applyFilters}><div className="asset-drawer-body">
       <div className="form-section"><h3>Location</h3><div className="form-grid">
@@ -329,7 +334,8 @@ export default function Assets() {
         <div><label htmlFor="asset-filter-purchase-to">To</label><input id="asset-filter-purchase-to" type="date" min={draftFilters.purchaseFrom || undefined} value={draftFilters.purchaseTo} onChange={(event) => setDraftFilter('purchaseTo', event.target.value)} /></div>
       </div></div>
     </div><footer className="asset-drawer-footer"><button className="btn" type="button" onClick={clearFilters}>Clear filters</button><button className="btn blue" type="submit">Apply filters</button></footer></form></aside></div></DrawerPortal>}
-    {modal && <AssetModal asset={modal._id ? modal : null} onClose={() => setModal(null)} onSaved={saved} />}
+    {modal && <AssetModal asset={modal._id ? modal : null} initialValues={modal.initialValues} onClose={() => setModal(null)} onSaved={saved} />}
+    {scanOpen && <MobileAssetScanner onClose={() => setScanOpen(false)} onReview={(initialValues) => { setScanOpen(false); setModal(initialValues ? { initialValues } : {}); }} />}
     {importing && <ImportModal onClose={closeImport} onImported={() => { closeImport(); load(); }} />}
     {labelsOpen && <QrLabelsModal assets={rows || []} onClose={() => setLabelsOpen(false)} />}
     {deleteTarget && <div className="modal-backdrop"><div className="modal-dialog confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-list-asset-title"><div className="modal-heading"><p className="eyebrow">Destructive action</p><h2 id="delete-list-asset-title">Delete asset?</h2><p className="sub">This permanently removes <b>{deleteTarget.inventoryTag}</b> · {deleteTarget.name} from the register.</p></div><div className="modal-actions"><button className="btn" type="button" onClick={() => setDeleteTarget(null)} disabled={deleteBusy}>Cancel</button><button className="btn danger" type="button" onClick={deleteAsset} disabled={deleteBusy}>{deleteBusy ? 'Deleting…' : 'Delete permanently'}</button></div></div></div>}

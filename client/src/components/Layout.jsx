@@ -152,7 +152,7 @@ export default function Layout({ children, theme, setTheme, onSignOut }) {
             <Icon name={icon} className="nav-icon" />
             <small>{label}</small>
           </button> : <NavLink key={to} to={to} onClick={() => setMoreOpen(false)}>
-            <span>{icon}</span>
+            <Icon name={icon} className="nav-icon" />
             <small>{label}</small>
           </NavLink>
         ))}

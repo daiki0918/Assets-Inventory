@@ -1,35 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { api } from '../lib/api';
+import { compressPhoto } from '../lib/assetPhoto';
 import DrawerPortal from './DrawerPortal';
 
-const emptyForm = { cluster: '', branch: '', location: '', name: '', category: '', description: '', condition: 'Good', serialNo: '', purchaseDate: '', cost: '', salvageValue: 0, usefulLifeYears: 5, quantity: 1, photoUrl: '' };
+const emptyForm = { cluster: '', branch: '', location: '', name: '', category: '', brand: '', modelNo: '', assetType: '', description: '', condition: 'Good', serialNo: '', purchaseDate: '', cost: '', salvageValue: 0, usefulLifeYears: 5, quantity: 1, photoUrl: '' };
 const ASSET_CLUSTERS = new Set(['SOUTH', 'NORTH']);
 const ANIMATION_MS = 300; // keep in sync with the CSS transition duration
-const MAX_PHOTO_BYTES = 1_200_000;
-
-const compressPhoto = (file) => new Promise((resolve, reject) => {
-  const reader = new FileReader();
-  reader.onerror = () => reject(new Error('Could not read this image. Try another file.'));
-  reader.onload = () => {
-    const image = new Image();
-    image.onerror = () => reject(new Error('This image could not be opened.'));
-    image.onload = () => {
-      const scale = Math.min(1, 1200 / Math.max(image.width, image.height));
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.round(image.width * scale);
-      canvas.height = Math.round(image.height * scale);
-      canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
-      const photoUrl = canvas.toDataURL('image/jpeg', 0.8);
-      if (photoUrl.length > MAX_PHOTO_BYTES) reject(new Error('Image is too large after compression. Choose a smaller photo.'));
-      else resolve(photoUrl);
-    };
-    image.src = reader.result;
-  };
-  reader.readAsDataURL(file);
-});
-
-export default function AssetModal({ asset, onClose, onSaved }) {
+export default function AssetModal({ asset, initialValues, onClose, onSaved }) {
   const { meta, reloadMeta } = useAuth();
   const assetClusterId = asset?.cluster?._id || asset?.cluster;
   const clusters = useMemo(() => meta.clusters.filter((item) => (
@@ -37,9 +15,9 @@ export default function AssetModal({ asset, onClose, onSaved }) {
   )), [asset, assetClusterId, meta.clusters]);
   const [form, setForm] = useState(() => asset ? {
     cluster: asset.cluster?._id || '', branch: asset.branch?._id || '', location: asset.location?._id || '',
-    name: asset.name || '', category: asset.category || '', description: asset.description || '', condition: asset.condition || 'Good', serialNo: asset.serialNo || '',
+    name: asset.name || '', category: asset.category || '', brand: asset.brand || '', modelNo: asset.modelNo || '', assetType: asset.assetType || '', description: asset.description || '', condition: asset.condition ?? 'Good', serialNo: asset.serialNo || '',
     purchaseDate: asset.purchaseDate?.slice(0, 10) || '', cost: asset.cost ?? '', salvageValue: asset.salvageValue ?? 0, usefulLifeYears: asset.usefulLifeYears ?? 5, photoUrl: asset.photoUrl || '',
-  } : emptyForm);
+  } : { ...emptyForm, ...initialValues });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [reviewing, setReviewing] = useState(false);
@@ -201,8 +179,11 @@ export default function AssetModal({ asset, onClose, onSaved }) {
               <div className="wide"><label htmlFor="asset-name">Asset name</label><input id="asset-name" required value={form.name} onChange={set('name')} placeholder="e.g. Reception sofa" /></div>
               <div><label htmlFor="asset-category">Category</label><input id="asset-category" value={form.category} onChange={set('category')} placeholder="e.g. Furniture" /></div>
               <div><label htmlFor="asset-serial">Serial number</label><input id="asset-serial" value={form.serialNo} onChange={set('serialNo')} placeholder="Optional" />{!isEditing && Number(form.quantity) > 1 && <small className="field-hint">Assigned to the first asset only; add other units’ serials separately.</small>}</div>
-              <div className="wide"><label htmlFor="asset-description">Description / Brand / Model</label><textarea id="asset-description" rows="2" value={form.description} onChange={set('description')} placeholder="e.g. 3 Seater / Color Black" /></div>
-              {isEditing && <div><label htmlFor="asset-condition">Condition</label><input id="asset-condition" maxLength="120" value={form.condition} onChange={set('condition')} placeholder="e.g. Good, worn upholstery" /></div>}
+              {(isEditing || initialValues) && <><div><label htmlFor="asset-brand">Brand / manufacturer</label><input id="asset-brand" maxLength="160" value={form.brand} onChange={set('brand')} placeholder="Optional" /></div>
+                <div><label htmlFor="asset-model">Model number</label><input id="asset-model" maxLength="160" value={form.modelNo} onChange={set('modelNo')} placeholder="Optional" /></div>
+                <div><label htmlFor="asset-type">Asset type</label><input id="asset-type" maxLength="160" value={form.assetType} onChange={set('assetType')} placeholder="e.g. Laptop" /></div>
+                <div><label htmlFor="asset-condition">Condition</label><input id="asset-condition" maxLength="120" value={form.condition} onChange={set('condition')} placeholder="e.g. Good, worn upholstery" /></div></>}
+              <div className="wide"><label htmlFor="asset-description">{!isEditing && !initialValues ? 'Description / Brand / Model' : 'Description'}</label><textarea id="asset-description" rows="2" value={form.description} onChange={set('description')} placeholder={!isEditing && !initialValues ? 'e.g. 3 Seater / Color Black' : 'Optional details about the asset'} /></div>
               {!isEditing && <div><label htmlFor="asset-quantity">Quantity</label><input id="asset-quantity" type="number" min="1" max="500" step="1" required value={form.quantity} onChange={set('quantity')} /><small className="field-hint">Creates one separately tracked record per physical asset.</small></div>}
             </div></div>
 
